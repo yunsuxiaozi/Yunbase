@@ -81,7 +81,7 @@ class Yunbase():
             for col in df.columns:
                 if col!=self.target_col and col!=self.group_col:
                     if (df[col].nunique()<20) and (df[col].nunique()>2):
-                        self.one_hot_cols.append([col,sorted(df[col].unique())]) 
+                        self.one_hot_cols.append([col,list(df[col].unique())]) 
         for i in range(len(self.one_hot_cols)):
             col,nunique=self.one_hot_cols[i]
             for u in nunique:
@@ -142,6 +142,12 @@ class Yunbase():
         
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
+        
+        self.col2name={}
+        for i in range(len(list(X.columns))):
+            self.col2name[list(X.columns)[i]]=f'col_{i}'
+        X=X.rename(columns=self.col2name)
+        
         if self.group_col!=None:
             group=self.train[self.group_col]
         else:
@@ -173,7 +179,9 @@ class Yunbase():
         #提供的训练数据不是df表格
         if not isinstance(self.test, pd.DataFrame):
             raise ValueError("test_path_or_file is not pd.DataFrame")
-        self.test=self.Feature_Engineer(self.test,mode='test').drop([self.group_col,self.target_col],axis=1,errors='ignore')
+        self.test=self.Feature_Engineer(self.test,mode='test')
+        self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
+        self.test=self.test.rename(columns=self.col2name)
         if self.objective.lower()=='regression':
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             fold=0
