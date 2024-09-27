@@ -148,6 +148,20 @@ class Yunbase():
             self.col2name[list(X.columns)[i]]=f'col_{i}'
         X=X.rename(columns=self.col2name)
         
+        for col in X.columns:
+            if X[col].dtype==object:
+                X[col]=X[col].astype(np.float32)
+                
+        #分类任务搞个target2idx,idx2target
+        if self.objective.lower()!='regression':
+            self.target2idx={}
+            self.idx2target={}
+            y_unique=sorted(list(y.unique()))
+            for i in range(len(y_unique)):
+                self.target2idx[y_unique[i]]=i
+                self.idx2target[i]=y_unique[i]
+            y=y.apply(lambda k:self.target2idx[k])
+        
         if self.group_col!=None:
             group=self.train[self.group_col]
         else:
@@ -182,6 +196,9 @@ class Yunbase():
         self.test=self.Feature_Engineer(self.test,mode='test')
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         self.test=self.test.rename(columns=self.col2name)
+        for col in self.test.columns:
+            if self.test[col].dtype==object:
+                self.test[col]=self.test[col].astype(np.float32)
         if self.objective.lower()=='regression':
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             fold=0
@@ -199,5 +216,7 @@ class Yunbase():
     def submit(self,submission_path='submission.csv',test_preds=None):
         submission=pd.read_csv(submission_path)
         submission[self.target_col]=test_preds
+        if self.objective.lower()!='regression':
+            submission[self.target_col]=submission[self.target_col].apply(lambda x:idx2target[x])
         submission.to_csv("yunbase.csv",index=None)
         submission.head()
