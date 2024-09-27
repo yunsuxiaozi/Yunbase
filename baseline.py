@@ -76,6 +76,17 @@ class Yunbase():
             self.unique_cols=[col for col in df.columns if df[col].nunique()==1]
             #如果一列是object列,那肯定不能放入模型进行学习
             self.object_cols=[col for col in df.columns if (df[col].dtype==object) and (col!=self.group_col)]
+            #one_hot_cols
+            self.one_hot_cols=[]
+            for col in df.columns:
+                if col!=self.target_col and col!=self.group_col:
+                    if (df[col].nunique()<20) and (df[col].nunique()>2):
+                        self.one_hot_cols.append([col,sorted(df[col].unique())]) 
+        for i in range(len(self.one_hot_cols)):
+            col,nunique=self.one_hot_cols[i]
+            for u in nunique:
+                df[f"{col}_{u}"]=(df[col]==u).astype(np.int8)
+        
         #去除无用的列
         df.drop(self.nan_cols+self.unique_cols+self.object_cols,axis=1,inplace=True,errors='ignore')
         return df
@@ -96,7 +107,7 @@ class Yunbase():
         #提供的训练数据不是df表格
         if not isinstance(self.train, pd.DataFrame):
             raise ValueError("train_path_or_file is not pd.DataFrame")
-        self.train=self.Feature_Engineer(self.train)
+        self.train=self.Feature_Engineer(self.train,mode='train')
         
         #二分类,多分类,回归
         if self.objective.lower() not in ['binary','multi_class','regression']:
@@ -116,7 +127,10 @@ class Yunbase():
                 
         #模型的训练,如果你自己准备了模型,那就用你的模型,否则就用我的模型
         if len(self.models)==0:
-            lgb_params={"boosting_type": "gbdt","metric": self.metric.lower(),#"objective": self.objective.lower(),
+            metric=self.metric.lower()
+            if self.objective.lower()=='multi_class':
+                metric='multi_logloss'
+            lgb_params={"boosting_type": "gbdt","metric": metric,#"objective": self.objective.lower(),
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.05,
                         "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
                         "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
@@ -124,13 +138,17 @@ class Yunbase():
             if self.objective.lower()=='regression':
                 self.models=[(LGBMRegressor(**lgb_params),'lgb')]
             else:
-                self.models=[(LGBMCLassifier(**lgb_params),'lgb')]
+                self.models=[(LGBMClassifier(**lgb_params),'lgb')]
         
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
+        if self.group_col!=None:
+            group=self.train[self.group_col]
+        else:
+            group=None
         for (model,model_name) in self.models:
             oof=np.zeros(len(y))
-            for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,self.train[self.group_col]))):
+            for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
                 print(f"name:{model_name},fold:{fold}")
 
                 X_train, X_valid = X.iloc[train_index].reset_index(drop=True), X.iloc[valid_index].reset_index(drop=True)
@@ -138,7 +156,7 @@ class Yunbase():
 
                 if 'lgb' in model_name:
                     model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
-                             callbacks=[log_evaluation(500),early_stopping(200)]
+                             callbacks=[log_evaluation(100),early_stopping(200)]
                         ) 
                 else:
                     model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=500) 
@@ -155,7 +173,7 @@ class Yunbase():
         #提供的训练数据不是df表格
         if not isinstance(self.test, pd.DataFrame):
             raise ValueError("test_path_or_file is not pd.DataFrame")
-        self.test=self.Feature_Engineer(self.test)
+        self.test=self.Feature_Engineer(self.test,mode='test').drop([self.group_col,self.target_col],axis=1,errors='ignore')
         if self.objective.lower()=='regression':
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             fold=0
@@ -164,7 +182,7 @@ class Yunbase():
                 fold+=1
             return test_preds.mean(axis=0)
         else:
-            test_preds=np.zeros((len(self.models)*self.num_folds),len(self.test),self.num_classes)
+            test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
             fold=0
             for (model_name,model) in self.pretrained_models.items():
                 test_preds[fold]=model.predict_proba(self.test)
