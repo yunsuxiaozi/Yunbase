@@ -1,3 +1,4 @@
+
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
@@ -11,8 +12,8 @@ from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,G
 from sklearn.metrics import roc_auc_score
 #model lightgbm回归模型,日志评估
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
-from catboost import CatBoostRegressor
-from xgboost import XGBRegressor
+from catboost import CatBoostRegressor,CatBoostClassifier
+from xgboost import XGBRegressor,XGBClassifier
 import warnings#避免一些可以忽略的报错
 warnings.filterwarnings('ignore')#filterwarnings()方法是用于设置警告过滤器的方法，它可以控制警告信息的输出方式和级别。
 class Yunbase():
@@ -28,6 +29,8 @@ class Yunbase():
                       target_col='target',
                       infer_size=10000,
                       save_oof_preds=True,
+                      device='cpu',
+                      one_hot_max=50,
                 ):
         """
         num_folds:是k折交叉验证的折数
@@ -42,30 +45,42 @@ class Yunbase():
         target_col:需要预测的那一列
         infer_size:测试数据可能内存太大,一次推理会出错,所以有了分批次预测.
         save_oof_preds:是否保存交叉验证的结果用于后续的研究
+        device:将树模型放在GPU还是CPU上训练.
+        one_hot_max:一列特征的nunique少于多少做onehot处理.
         """
         self.num_folds=num_folds
+        if self.num_folds<2:
+            raise ValueError("num_folds must be greater than 2")
         self.seed=seed
         self.models=models
         self.FE=FE
+        
         self.objective=objective.lower()
+        if self.objective not in ['binary','regression','multi_class']:
+            raise ValueError("objective currently only supports binary、regression、multi_class")
+        
         self.metric=metric.lower()
         self.nan_margin=nan_margin
+        if self.nan_margin<0 or self.nan_margin>1:
+            raise ValueError("self.nan_margin must be within the range of 0 to 1")
         self.group_col=group_col
         self.target_col=target_col
         self.infer_size=infer_size
         self.save_oof_preds=save_oof_preds
         self.num_classes=num_classes
+        self.device=device.lower()
         if (self.objective=='binary') and self.num_classes!=2:
             raise ValueError("num_classes must be 2")
         elif self.objective=='multi_class' and self.num_classes==None:
             raise ValueError("num_classes must be a number")
+        self.one_hot_max=one_hot_max
         self.pretrained_models={}#用字典的方式保存已经训练好的模型
         
     def get_details(self,):
         #目前支持的评估指标有
         metrics=['rmse','mse','accuracy','auc']
         #目前支持的模型有
-        models=['lgb']
+        models=['lgb','cat','xgb']
         #目前支持的交叉验证方法有
         kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold']
         #目前支持的任务
@@ -133,14 +148,21 @@ class Yunbase():
             self.object_cols=[col for col in df.columns if (df[col].dtype==object) and (col!=self.group_col)]
             #one_hot_cols
             self.one_hot_cols=[]
+            self.nunique_2_cols=[]
             for col in df.columns:
                 if col!=self.target_col and col!=self.group_col:
-                    if (df[col].nunique()<50) and (df[col].nunique()>2):
+                    if (df[col].nunique()<self.one_hot_max) and (df[col].nunique()>2):
                         self.one_hot_cols.append([col,list(df[col].unique())]) 
+                    elif df[col].nunique()==2:
+                        self.nunique_2_cols.append([col,list(df[col].unique())[0]])
+                    
         for i in range(len(self.one_hot_cols)):
             col,nunique=self.one_hot_cols[i]
             for u in nunique:
                 df[f"{col}_{u}"]=(df[col]==u).astype(np.int8)
+        for i in range(len(self.nunique_2_cols)):
+            c,u=self.nunique_2_cols[i]
+            df[f"{c}_{u}"]=(df[c]==u).astype(np.int8)
         
         #去除无用的列
         df.drop(self.nan_cols+self.unique_cols+self.object_cols,axis=1,inplace=True,errors='ignore')
@@ -187,6 +209,7 @@ class Yunbase():
                 
         #模型的训练,如果你自己准备了模型,那就用你的模型,否则就用我的模型
         if len(self.models)==0:
+            
             metric=self.metric
             if self.objective=='multi_class':
                 metric='multi_logloss'
@@ -195,10 +218,49 @@ class Yunbase():
                         "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
                         "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
                         }
+            
+            #catboost的metric设置
+            if self.metric=='multi_logloss':
+                metric='Logloss'
+            elif self.metric=='auc':
+                metric='AUC'
+            elif self.metric in ['rmse','mse']:
+                metric='RMSE'
+            elif self.metric=='accuracy':
+                metric='Accuracy'
+            cat_params={'eval_metric'         : metric,
+                       'bagging_temperature' : 0.50,
+                       'iterations'          : 10000,
+                       'learning_rate'       : 0.08,
+                       'max_depth'           : 12,
+                       'l2_leaf_reg'         : 1.25,
+                       'min_data_in_leaf'    : 24,
+                       'random_strength'     : 0.25, 
+                       'verbose'             : 0,
+                      }
+            
+            xgb_params={'random_state': 2024, 'n_estimators': 10000, 
+                        'learning_rate': 0.01, 'max_depth': 10,
+                        'reg_alpha': 0.08, 'reg_lambda': 0.8, 
+                        'subsample': 0.95, 'colsample_bytree': 0.6, 
+                        'min_child_weight': 3,'early_stopping_rounds':100,
+                       }
+            if self.device in ['cuda','gpu']:#gpu常见的写法,目前只有lgb模型
+                lgb_params['device']='gpu'
+                lgb_params['gpu_use_dp']=True
+                cat_params['task_type']="GPU"
+                xgb_params['tree_method']='gpu_hist'
+                
             if self.objective=='regression':
-                self.models=[(LGBMRegressor(**lgb_params),'lgb')]
+                self.models=[(LGBMRegressor(**lgb_params),'lgb'),
+                             (CatBoostRegressor(**cat_params),'cat'),
+                             (XGBRegressor(**xgb_params),'xgb')
+                            ]
             else:
-                self.models=[(LGBMClassifier(**lgb_params),'lgb')]
+                self.models=[(LGBMClassifier(**lgb_params),'lgb'),
+                             (CatBoostClassifier(**cat_params),'cat'),
+                             (XGBClassifier(**xgb_params),'xgb'),
+                            ]
         
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
@@ -241,8 +303,15 @@ class Yunbase():
                     model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                              callbacks=[log_evaluation(100),early_stopping(200)]
                         ) 
-                else:
-                    model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=500) 
+                elif 'cat' in model_name:
+                    model.fit(X_train, y_train,
+                          eval_set=(X_valid, y_valid),
+                          early_stopping_rounds=100, verbose=200)
+                elif 'xgb' in model_name:
+                    model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=200)
+                else:#假设你还有其他的模型
+                    model.fit(X_train,y_train) 
+                
                 if self.objective=='regression':
                     oof_preds[valid_index]=model.predict(X_valid)
                 else:
