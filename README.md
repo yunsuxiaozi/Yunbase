@@ -6,26 +6,34 @@
 
 1.克隆项目到本地
 
-> git clone https://github.com/yunsuxiaozi/Yunbase.git
+```python
+`!git clone https://github.com/yunsuxiaozi/Yunbase.git`
+```
 
 2.导入Yunbase
 
->  from Yunbase.baseline import Yunbase
+```python
+from Yunbase.baseline import Yunbase
+```
 
 3.创建Yunbase类
 
-> ```python
-> yunbase=Yunbase(num_folds=5,
->                       models=[],
->                       FE=None,
->                       seed=2024,
->                       objective='regression',
->                       metric='rmse',
->                       nan_margin=0.95,
->                       group_col='p_num',
->                       target_col='bg+1:00',
->                )
-> ```
+```python
+yunbase=Yunbase(num_folds=5,
+                   models=[],
+                   FE=None,
+                   seed=2024,
+                   objective='regression',
+                   metric='rmse',
+                   nan_margin=0.95,
+                   group_col='p_num',
+                   target_col='bg+1:00',
+                   infer_size=10000,
+                   save_oof_preds=True,
+                   device='cpu',
+                   one_hot_max=50,
+            )
+```
 
 - num_folds:k折交叉验证的折数
 - models和FE是给用户灵活使用的。FE是一个特征工程的函数,你可以定义自己的特征工程,函数的使用方法形如:df=FE(df),models可以存储你自己的模型,例如:[(LGBMRegressor(**lgb_params),'lgb')]
@@ -35,14 +43,18 @@
 - nan_margin:就是表格数据中某列缺失值大于多少,我们选择丢掉这列。
 - group_col是针对groupkfold而设计的,如果一个任务你认为需要用到groupkfold,group_col就是groupkfold的group那列。
 - target_col:我们需要预测的那列,也就是标签列。
+- infer_size:在模型推理的时候可能会由于测试数据太大,无法一次性推理完成,所以这里采用batch推理的方法,比如一次推理10000个测试数据。
+- save_oof_preds:设置为True或者False,就是要不要保存模型交叉验证的结果,可能有人会想要分析模型对于哪些样本预测的好,哪些样本预测的差。
+- device为cpu或者gpu,就是模型训练的时候是在cpu环境还是在gpu环境。
+- one_hot_max就是设置一个特征列的nunique小于多少的时候会对这列进行onehotencoder.
 
 4.模型的训练
 
 目前支持csv文件的路径,或者已经读取出来的csv文件。
 
-> ```python
-> yunbase.fit(train_path_or_file="train.csv")
-> ```
+```python
+yunbase.fit(train_path_or_file="train.csv")
+```
 
 5.模型的推理
 
@@ -68,4 +80,4 @@ yunbase使用的参考教程
 
 
 
- 2024/9/27
+ 2024/10/01
