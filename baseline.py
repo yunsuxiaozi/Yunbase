@@ -1,13 +1,14 @@
 """
 @author:yunsuxiaozi
-@start_time:2024/9/27
-@update_time:2024/9/30
+@start_time:2024/09/27
+@update_time:2024/10/01
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
 import numpy as np#对矩阵进行科学计算的库
 #这里使用groupkfold
 from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,GroupKFold
+from sklearn.metrics import roc_auc_score
 #model lightgbm回归模型,日志评估
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor
@@ -46,19 +47,23 @@ class Yunbase():
         self.seed=seed
         self.models=models
         self.FE=FE
-        self.objective=objective
-        self.metric=metric
+        self.objective=objective.lower()
+        self.metric=metric.lower()
         self.nan_margin=nan_margin
         self.group_col=group_col
         self.target_col=target_col
         self.infer_size=infer_size
         self.save_oof_preds=save_oof_preds
         self.num_classes=num_classes
+        if (self.objective=='binary') and self.num_classes!=2:
+            raise ValueError("num_classes must be 2")
+        elif self.objective=='multi_class' and self.num_classes==None:
+            raise ValueError("num_classes must be a number")
         self.pretrained_models={}#用字典的方式保存已经训练好的模型
         
     def get_details(self,):
         #目前支持的评估指标有
-        metrics=['rmse','mse','accuracy']
+        metrics=['rmse','mse','accuracy','auc']
         #目前支持的模型有
         models=['lgb']
         #目前支持的交叉验证方法有
@@ -130,7 +135,7 @@ class Yunbase():
             self.one_hot_cols=[]
             for col in df.columns:
                 if col!=self.target_col and col!=self.group_col:
-                    if (df[col].nunique()<20) and (df[col].nunique()>2):
+                    if (df[col].nunique()<50) and (df[col].nunique()>2):
                         self.one_hot_cols.append([col,list(df[col].unique())]) 
         for i in range(len(self.one_hot_cols)):
             col,nunique=self.one_hot_cols[i]
@@ -142,18 +147,22 @@ class Yunbase():
         df=self.reduce_mem_usage(df, float16_as32=True)
         return df
     
-    def Metric(self,y_true,y_pred):
+    def Metric(self,y_true,y_pred):#对于分类任务是标签和预测的每个类别的概率
         if self.metric=='rmse':
             return np.sqrt(np.mean((y_true-y_pred)**2))
         if self.metric=='mse':
             return np.mean((y_true-y_pred)**2)
         if self.metric=='accuracy':
+            #概率转换成最大的类别
+            y_pred=np.argmax(y_pred,axis=1)
             return np.mean(y_true==y_pred)
+        if self.metric=='auc':
+            return roc_auc_score(y_true,y_pred[:,1])
     def fit(self,train_path_or_file='train.csv'):
         try:#path试试
             self.train=pl.read_csv(train_path_or_file)
             self.train=self.train.to_pandas()
-        except:#file
+        except:#csv_file
             self.train=train_path_or_file
         #提供的训练数据不是df表格
         if not isinstance(self.train, pd.DataFrame):
@@ -161,11 +170,11 @@ class Yunbase():
         self.train=self.Feature_Engineer(self.train,mode='train')
         
         #二分类,多分类,回归
-        if self.objective.lower() not in ['binary','multi_class','regression']:
+        if self.objective not in ['binary','multi_class','regression']:
             raise ValueError("Wrong or currently unsupported objective")
         
         #选择哪种交叉验证方法
-        if self.objective.lower()=='binary' or self.objective.lower()=='multi_class':
+        if self.objective=='binary' or self.objective=='multi_class':
             if self.group_col!=None:#group
                 kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
             else:
@@ -178,15 +187,15 @@ class Yunbase():
                 
         #模型的训练,如果你自己准备了模型,那就用你的模型,否则就用我的模型
         if len(self.models)==0:
-            metric=self.metric.lower()
-            if self.objective.lower()=='multi_class':
+            metric=self.metric
+            if self.objective=='multi_class':
                 metric='multi_logloss'
-            lgb_params={"boosting_type": "gbdt","metric": metric,#"objective": self.objective.lower(),
+            lgb_params={"boosting_type": "gbdt","metric": metric,
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.05,
                         "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
                         "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
                         }
-            if self.objective.lower()=='regression':
+            if self.objective=='regression':
                 self.models=[(LGBMRegressor(**lgb_params),'lgb')]
             else:
                 self.models=[(LGBMClassifier(**lgb_params),'lgb')]
@@ -204,7 +213,7 @@ class Yunbase():
                 X[col]=X[col].astype(np.float32)
                 
         #分类任务搞个target2idx,idx2target
-        if self.objective.lower()!='regression':
+        if self.objective!='regression':
             self.target2idx={}
             self.idx2target={}
             y_unique=sorted(list(y.unique()))
@@ -218,7 +227,10 @@ class Yunbase():
         else:
             group=None
         for (model,model_name) in self.models:
-            oof_preds=np.zeros(len(y))
+            if self.objective=='regression':
+                oof_preds=np.zeros(len(y))
+            else:
+                oof_preds=np.zeros((len(y),self.num_classes))
             for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
                 print(f"name:{model_name},fold:{fold}")
 
@@ -231,7 +243,10 @@ class Yunbase():
                         ) 
                 else:
                     model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=500) 
-                oof_preds[valid_index]=model.predict(X_valid)
+                if self.objective=='regression':
+                    oof_preds[valid_index]=model.predict(X_valid)
+                else:
+                    oof_preds[valid_index]=model.predict_proba(X_valid)
                 self.pretrained_models[f'{model_name}_fold{fold}']=model
             print(f"{self.metric}:{self.Metric(y.values,oof_preds)}")
             if self.save_oof_preds:#如果需要保存oof_preds
@@ -252,7 +267,7 @@ class Yunbase():
         for col in self.test.columns:
             if self.test[col].dtype==object:
                 self.test[col]=self.test[col].astype(np.float32)
-        if self.objective.lower()=='regression':
+        if self.objective=='regression':
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             fold=0
             for (model_name,model) in self.pretrained_models.items():
@@ -262,7 +277,7 @@ class Yunbase():
                 test_preds[fold]=test_pred
                 fold+=1
             return test_preds.mean(axis=0)
-        else:
+        else:#分类任务到底要的是什么
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
             fold=0
             for (model_name,model) in self.pretrained_models.items():
@@ -271,12 +286,15 @@ class Yunbase():
                     test_pred[i:i+self.infer_size]=model.predict_proba(self.test[i:i+self.infer_size])
                 test_preds[fold]=test_pred
                 fold+=1
+            if self.metric=='auc':
+                return test_preds.mean(axis=0)[:,1]
             test_preds=np.argmax(test_preds.mean(axis=0),axis=1)
             return test_preds
     def submit(self,submission_path='submission.csv',test_preds=None):
         submission=pd.read_csv(submission_path)
         submission[self.target_col]=test_preds
-        if self.objective.lower()!='regression':
-            submission[self.target_col]=submission[self.target_col].apply(lambda x:idx2target[x])
+        if self.objective!='regression':
+            if self.metric!='auc':
+                submission[self.target_col]=submission[self.target_col].apply(lambda x:idx2target[x])
         submission.to_csv("yunbase.csv",index=None)
         submission.head()
