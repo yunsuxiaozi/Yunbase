@@ -2,7 +2,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/01
+@update_time:2024/10/02
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
@@ -14,6 +14,7 @@ from sklearn.metrics import roc_auc_score
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor,CatBoostClassifier
 from xgboost import XGBRegressor,XGBClassifier
+import optuna#自动超参数优化框架
 import warnings#避免一些可以忽略的报错
 warnings.filterwarnings('ignore')#filterwarnings()方法是用于设置警告过滤器的方法，它可以控制警告信息的输出方式和级别。
 class Yunbase():
@@ -31,6 +32,9 @@ class Yunbase():
                       save_oof_preds=True,
                       device='cpu',
                       one_hot_max=50,
+                      custom_metric=None,
+                      use_optuna_find_params=0,
+                      optuna_direction=None,
                 ):
         """
         num_folds:是k折交叉验证的折数
@@ -47,6 +51,9 @@ class Yunbase():
         save_oof_preds:是否保存交叉验证的结果用于后续的研究
         device:将树模型放在GPU还是CPU上训练.
         one_hot_max:一列特征的nunique少于多少做onehot处理.
+        custom_metric:自定义评估指标,对于分类任务,输入的是y_true和预测出每个类别的概率分布.
+        use_optuna_find_params:使用optuna找参数的迭代次数,如果为0则说明不找,目前只支持lightgbm模型.
+        optuna_direction:'minimize'或者'maximize',评估指标是最大还是最小
         """
         self.num_folds=num_folds
         if self.num_folds<2:
@@ -74,11 +81,17 @@ class Yunbase():
         elif self.objective=='multi_class' and self.num_classes==None:
             raise ValueError("num_classes must be a number")
         self.one_hot_max=one_hot_max
+        self.custom_metric=custom_metric
+        self.use_optuna_find_params=use_optuna_find_params
+        self.optuna_direction=optuna_direction
+        #如果你要用optuna找参数并且自定义评估指标,却不说评估指标要最大还是最小,就要报错.
+        if (self.use_optuna_find_params) and (self.custom_metric!=None) and self.optuna_direction not in ['minimize','maximize']:
+            raise ValueError("optuna_direction must be 'minimize' or 'maximize'")
         self.pretrained_models={}#用字典的方式保存已经训练好的模型
         
     def get_details(self,):
         #目前支持的评估指标有
-        metrics=['rmse','mse','accuracy','auc']
+        metrics=['custom_metric','rmse','mse','accuracy','auc']
         #目前支持的模型有
         models=['lgb','cat','xgb']
         #目前支持的交叉验证方法有
@@ -170,16 +183,104 @@ class Yunbase():
         return df
     
     def Metric(self,y_true,y_pred):#对于分类任务是标签和预测的每个类别的概率
-        if self.metric=='rmse':
+        #如果你有自定义的评估指标,那就用你的评估指标
+        if self.custom_metric!=None:
+            return self.custom_metric(y_true,y_pred)
+        elif self.metric=='rmse':
             return np.sqrt(np.mean((y_true-y_pred)**2))
-        if self.metric=='mse':
+        elif self.metric=='mse':
             return np.mean((y_true-y_pred)**2)
-        if self.metric=='accuracy':
+        elif self.metric=='accuracy':
             #概率转换成最大的类别
             y_pred=np.argmax(y_pred,axis=1)
             return np.mean(y_true==y_pred)
-        if self.metric=='auc':
+        elif self.metric=='auc':
             return roc_auc_score(y_true,y_pred[:,1])
+        
+    #用optuna找lgb模型的参数,暂时不支持custom_metric
+    def optuna_lgb(self,X,y,group,kf,metric):
+        def objective(trial):
+            params = {
+                "boosting_type": "gbdt","metric": metric,
+                'random_state': self.seed,
+                'n_estimators': trial.suggest_int('n_estimators', 500,1500),
+                'reg_alpha': trial.suggest_loguniform('reg_alpha', 1e-3, 10.0),
+                'reg_lambda': trial.suggest_loguniform('reg_lambda', 1e-3, 10.0),#对数分布的建议值
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1),#浮点数
+                'subsample': trial.suggest_float('subsample', 0.5, 1),
+                'learning_rate': trial.suggest_float('learning_rate', 1e-4, 0.5, log=True),
+                'num_leaves' : trial.suggest_int('num_leaves', 8, 64),#整数
+                'min_child_samples': trial.suggest_int('min_child_samples', 2, 100),
+                "extra_trees":True,
+                "verbose": -1
+            }
+            if self.device in ['cuda','gpu']:#gpu常见的写法
+                params['device']='gpu'
+                params['gpu_use_dp']=True
+            model_name='lgb'
+            if self.objective=='regression':
+                mdeol=LGBMRegressor(**params)
+            else:
+                model=LGBMClassifier(**params)
+            oof_preds,metric_score=self.fit_function(X,y,group,kf,model,model_name,use_optuna=True)
+            return metric_score
+        #优化最大值还是最小值
+        if self.metric in ['accuracy','auc']:
+            direction='maximize'
+        elif self.metric in ['rmse','mse']:
+            direction='minimize'
+        else:
+            direction=self.direction
+            
+        #创建的研究命名,找最大值.
+        study = optuna.create_study(direction=direction, study_name='find best lgb_params')
+        #目标函数,尝试的次数  
+        study.optimize(objective, n_trials=self.use_optuna_find_params)
+        best_params=study.best_trial.params
+        best_params["boosting_type"]="gbdt"
+        best_params["extra_trees"]=True
+        best_params["metric"]=metric
+        best_params['random_state']=self.seed
+        print(best_params)
+        return best_params
+    
+    #这个function会返回 oof_preds和metric_score,用于optuna找参数的.如果在使用optuna找参数,就不用保存预训练模型.
+    def fit_function(self,X,y,group,kf,model,model_name,use_optuna=False):
+        log=100
+        if use_optuna:
+            log=10000
+        if self.objective=='regression':
+            oof_preds=np.zeros(len(y))
+        else:
+            oof_preds=np.zeros((len(y),self.num_classes))
+        for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
+            print(f"name:{model_name},fold:{fold}")
+
+            X_train, X_valid = X.iloc[train_index].reset_index(drop=True), X.iloc[valid_index].reset_index(drop=True)
+            y_train, y_valid = y.iloc[train_index].reset_index(drop=True), y.iloc[valid_index].reset_index(drop=True)
+
+            if 'lgb' in model_name:
+                model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
+                         callbacks=[log_evaluation(log),early_stopping(200)]
+                    ) 
+            elif 'cat' in model_name:
+                model.fit(X_train, y_train,
+                      eval_set=(X_valid, y_valid),
+                      early_stopping_rounds=100, verbose=200)
+            elif 'xgb' in model_name:
+                model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=200)
+            else:#假设你还有其他的模型
+                model.fit(X_train,y_train) 
+
+            if self.objective=='regression':
+                oof_preds[valid_index]=model.predict(X_valid)
+            else:
+                oof_preds[valid_index]=model.predict_proba(X_valid)
+            if not use_optuna:#如果没有在找参数
+                self.pretrained_models[f'{model_name}_fold{fold}']=model
+        metric_score=self.Metric(y.values,oof_preds)
+        return oof_preds,metric_score
+      
     def fit(self,train_path_or_file='train.csv'):
         try:#path试试
             self.train=pl.read_csv(train_path_or_file)
@@ -206,61 +307,6 @@ class Yunbase():
                 kf=GroupKFold(n_splits=self.num_folds)
             else:
                 kf=KFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
-                
-        #模型的训练,如果你自己准备了模型,那就用你的模型,否则就用我的模型
-        if len(self.models)==0:
-            
-            metric=self.metric
-            if self.objective=='multi_class':
-                metric='multi_logloss'
-            lgb_params={"boosting_type": "gbdt","metric": metric,
-                        'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.05,
-                        "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
-                        "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
-                        }
-            
-            #catboost的metric设置
-            if self.metric=='multi_logloss':
-                metric='Logloss'
-            elif self.metric=='auc':
-                metric='AUC'
-            elif self.metric in ['rmse','mse']:
-                metric='RMSE'
-            elif self.metric=='accuracy':
-                metric='Accuracy'
-            cat_params={'eval_metric'         : metric,
-                       'bagging_temperature' : 0.50,
-                       'iterations'          : 10000,
-                       'learning_rate'       : 0.08,
-                       'max_depth'           : 12,
-                       'l2_leaf_reg'         : 1.25,
-                       'min_data_in_leaf'    : 24,
-                       'random_strength'     : 0.25, 
-                       'verbose'             : 0,
-                      }
-            
-            xgb_params={'random_state': 2024, 'n_estimators': 10000, 
-                        'learning_rate': 0.01, 'max_depth': 10,
-                        'reg_alpha': 0.08, 'reg_lambda': 0.8, 
-                        'subsample': 0.95, 'colsample_bytree': 0.6, 
-                        'min_child_weight': 3,'early_stopping_rounds':100,
-                       }
-            if self.device in ['cuda','gpu']:#gpu常见的写法,目前只有lgb模型
-                lgb_params['device']='gpu'
-                lgb_params['gpu_use_dp']=True
-                cat_params['task_type']="GPU"
-                xgb_params['tree_method']='gpu_hist'
-                
-            if self.objective=='regression':
-                self.models=[(LGBMRegressor(**lgb_params),'lgb'),
-                             (CatBoostRegressor(**cat_params),'cat'),
-                             (XGBRegressor(**xgb_params),'xgb')
-                            ]
-            else:
-                self.models=[(LGBMClassifier(**lgb_params),'lgb'),
-                             (CatBoostClassifier(**cat_params),'cat'),
-                             (XGBClassifier(**xgb_params),'xgb'),
-                            ]
         
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
@@ -288,36 +334,68 @@ class Yunbase():
             group=self.train[self.group_col]
         else:
             group=None
-        for (model,model_name) in self.models:
-            if self.objective=='regression':
-                oof_preds=np.zeros(len(y))
-            else:
-                oof_preds=np.zeros((len(y),self.num_classes))
-            for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
-                print(f"name:{model_name},fold:{fold}")
-
-                X_train, X_valid = X.iloc[train_index].reset_index(drop=True), X.iloc[valid_index].reset_index(drop=True)
-                y_train, y_valid = y.iloc[train_index].reset_index(drop=True), y.iloc[valid_index].reset_index(drop=True)
-
-                if 'lgb' in model_name:
-                    model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
-                             callbacks=[log_evaluation(100),early_stopping(200)]
-                        ) 
-                elif 'cat' in model_name:
-                    model.fit(X_train, y_train,
-                          eval_set=(X_valid, y_valid),
-                          early_stopping_rounds=100, verbose=200)
-                elif 'xgb' in model_name:
-                    model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=200)
-                else:#假设你还有其他的模型
-                    model.fit(X_train,y_train) 
+        
+        #模型的训练,如果你自己准备了模型,那就用你的模型,否则就用我的模型
+        if len(self.models)==0:
+            
+            metric=self.metric
+            if self.objective=='multi_class':
+                metric='multi_logloss'
+            lgb_params={"boosting_type": "gbdt","metric": metric,
+                        'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.05,
+                        "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
+                        "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
+                        }
+            #找到新的参数
+            if self.use_optuna_find_params:#如果要用optuna找lgb模型的参数
+                lgb_params=self.optuna_lgb(X,y,group,kf,metric)
+            
+            #catboost的metric设置
+            if self.metric=='multi_logloss':
+                metric='Logloss'
+            elif self.metric=='auc':
+                metric='AUC'
+            elif self.metric in ['rmse','mse']:
+                metric='RMSE'
+            elif self.metric=='accuracy':
+                metric='Accuracy'
+            cat_params={'eval_metric'         : metric,
+                       'bagging_temperature' : 0.50,
+                       'iterations'          : 10000,
+                       'learning_rate'       : 0.08,
+                       'max_depth'           : 12,
+                       'l2_leaf_reg'         : 1.25,
+                       'min_data_in_leaf'    : 24,
+                       'random_strength'     : 0.25, 
+                       'verbose'             : 0,
+                      }
+            
+            xgb_params={'random_state': 2024, 'n_estimators': 10000, 
+                        'learning_rate': 0.01, 'max_depth': 10,
+                        'reg_alpha': 0.08, 'reg_lambda': 0.8, 
+                        'subsample': 0.95, 'colsample_bytree': 0.6, 
+                        'min_child_weight': 3,'early_stopping_rounds':100,
+                       }
+            if self.device in ['cuda','gpu']:#gpu常见的写法
+                lgb_params['device']='gpu'
+                lgb_params['gpu_use_dp']=True
+                cat_params['task_type']="GPU"
+                xgb_params['tree_method']='gpu_hist'
                 
-                if self.objective=='regression':
-                    oof_preds[valid_index]=model.predict(X_valid)
-                else:
-                    oof_preds[valid_index]=model.predict_proba(X_valid)
-                self.pretrained_models[f'{model_name}_fold{fold}']=model
-            print(f"{self.metric}:{self.Metric(y.values,oof_preds)}")
+            if self.objective=='regression':
+                self.models=[(LGBMRegressor(**lgb_params),'lgb'),
+                             (CatBoostRegressor(**cat_params),'cat'),
+                             (XGBRegressor(**xgb_params),'xgb')
+                            ]
+            else:
+                self.models=[(LGBMClassifier(**lgb_params),'lgb'),
+                             (CatBoostClassifier(**cat_params),'cat'),
+                             (XGBClassifier(**xgb_params),'xgb'),
+                            ]
+            
+        for (model,model_name) in self.models:
+            oof_preds,metric_score=self.fit_function(X,y,group,kf,model,model_name,use_optuna=False)
+            print(f"{self.metric}:{metric_score}")
             if self.save_oof_preds:#如果需要保存oof_preds
                 np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
         
