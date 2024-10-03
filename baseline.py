@@ -1,15 +1,15 @@
-
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/02
+@update_time:2024/10/03
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
 import numpy as np#对矩阵进行科学计算的库
 #这里使用groupkfold
 from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,GroupKFold
-from sklearn.metrics import roc_auc_score
+#二分类常用的评估指标
+from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
 #model lightgbm回归模型,日志评估
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor,CatBoostClassifier
@@ -35,6 +35,7 @@ class Yunbase():
                       custom_metric=None,
                       use_optuna_find_params=0,
                       optuna_direction=None,
+                      early_stop=100,
                 ):
         """
         num_folds:是k折交叉验证的折数
@@ -54,7 +55,27 @@ class Yunbase():
         custom_metric:自定义评估指标,对于分类任务,输入的是y_true和预测出每个类别的概率分布.
         use_optuna_find_params:使用optuna找参数的迭代次数,如果为0则说明不找,目前只支持lightgbm模型.
         optuna_direction:'minimize'或者'maximize',评估指标是最大还是最小
+        early_stop:早停的次数,如果模型迭代多少次没有改善就会停下来.
         """
+        
+        #目前支持的评估指标有
+        self.supported_metrics=['custom_metric',
+                                'mae','rmse','mse','medae','rmsle',#回归任务
+                                'auc','f1_score','mcc',#二分类任务
+                                'accuracy','logloss',#多分类任务(分类任务)
+                               ]
+        #目前支持的模型有
+        self.supported_models=['lgb','cat','xgb']
+        #目前支持的交叉验证方法有
+        self.supported_kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold']
+        #目前支持的任务
+        self.supported_objectives=['binary','multi_class','regression']
+        
+        print(f"Currently supported metrics:{self.supported_metrics}")
+        print(f"Currently supported models:{self.supported_models}")
+        print(f"Currently supported kfolds:{self.supported_kfolds}")
+        print(f"Currently supported objectives:{self.supported_objectives}")
+        
         self.num_folds=num_folds
         if self.num_folds<2:
             raise ValueError("num_folds must be greater than 2")
@@ -63,10 +84,18 @@ class Yunbase():
         self.FE=FE
         
         self.objective=objective.lower()
-        if self.objective not in ['binary','regression','multi_class']:
-            raise ValueError("objective currently only supports binary、regression、multi_class")
+        #二分类,多分类,回归
+        if self.objective not in self.supported_objectives:
+            raise ValueError("Wrong or currently unsupported objective")
         
-        self.metric=metric.lower()
+        self.custom_metric=custom_metric#function
+        if self.custom_metric!=None:
+            self.metric='custom_metric'
+        else:
+            self.metric=metric.lower()
+        if self.metric not in self.supported_metrics and self.custom_metric==None:
+            raise ValueError("Wrong or currently unsupported metric,You can customize the evaluation metrics using 'custom_metric'")
+        
         self.nan_margin=nan_margin
         if self.nan_margin<0 or self.nan_margin>1:
             raise ValueError("self.nan_margin must be within the range of 0 to 1")
@@ -81,27 +110,13 @@ class Yunbase():
         elif self.objective=='multi_class' and self.num_classes==None:
             raise ValueError("num_classes must be a number")
         self.one_hot_max=one_hot_max
-        self.custom_metric=custom_metric
         self.use_optuna_find_params=use_optuna_find_params
         self.optuna_direction=optuna_direction
         #如果你要用optuna找参数并且自定义评估指标,却不说评估指标要最大还是最小,就要报错.
         if (self.use_optuna_find_params) and (self.custom_metric!=None) and self.optuna_direction not in ['minimize','maximize']:
             raise ValueError("optuna_direction must be 'minimize' or 'maximize'")
         self.pretrained_models={}#用字典的方式保存已经训练好的模型
-        
-    def get_details(self,):
-        #目前支持的评估指标有
-        metrics=['custom_metric','rmse','mse','accuracy','auc']
-        #目前支持的模型有
-        models=['lgb','cat','xgb']
-        #目前支持的交叉验证方法有
-        kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold']
-        #目前支持的任务
-        objectives=['binary','multi_class','regression']
-        print(f"Currently supported metrics:{metrics}")
-        print(f"Currently supported models:{models}")
-        print(f"Currently supported kfolds:{kfolds}")
-        print(f"Currently supported objectives:{objectives}")
+        self.early_stop=early_stop
         
     #遍历表格df的所有列修改数据类型减少内存使用
     def reduce_mem_usage(self,df, float16_as32=True):
@@ -186,16 +201,40 @@ class Yunbase():
         #如果你有自定义的评估指标,那就用你的评估指标
         if self.custom_metric!=None:
             return self.custom_metric(y_true,y_pred)
-        elif self.metric=='rmse':
-            return np.sqrt(np.mean((y_true-y_pred)**2))
-        elif self.metric=='mse':
-            return np.mean((y_true-y_pred)**2)
-        elif self.metric=='accuracy':
-            #概率转换成最大的类别
-            y_pred=np.argmax(y_pred,axis=1)
-            return np.mean(y_true==y_pred)
-        elif self.metric=='auc':
-            return roc_auc_score(y_true,y_pred[:,1])
+        if self.objective=='regression':
+            if self.metric=='medae':
+                return np.median(np.abs(y_true-y_pred))
+            elif self.metric=='mae':
+                return np.mean(np.abs(y_true-y_pred))
+            elif self.metric=='rmse':
+                return np.sqrt(np.mean((y_true-y_pred)**2))
+            elif self.metric=='mse':
+                return np.mean((y_true-y_pred)**2)
+            elif self.metric=='rmsle':
+                   return np.sqrt(np.mean((np.log1p(y_pred)-np.log1p(y_true))**2))
+        else:
+            if self.metric=='accuracy':
+                #转换成概率最大的类别
+                y_pred=np.argmax(y_pred,axis=1)
+                return np.mean(y_true==y_pred)
+            elif self.metric=='auc':
+                return roc_auc_score(y_true,y_pred[:,1])
+            elif self.metric=='f1_score':
+                #转换成概率最大的类别
+                y_pred=np.argmax(y_pred,axis=1)
+                return f1_score(y_true, y_pred)
+            elif self.metric=='mcc':
+                #转换成概率最大的类别
+                y_pred=np.argmax(y_pred,axis=1)
+                return matthews_corrcoef(y_true, y_pred)
+            elif self.metric=='logloss':
+                eps=1e-15
+                label=np.zeros_like(y_pred)
+                for i in range(len(label)):
+                    label[i][y_true[i]-1]=1
+                y_true=label
+                y_pred=np.clip(y_pred,eps,1-eps)
+                return -np.mean(np.sum(y_true*np.log(y_pred),axis=-1))
         
     #用optuna找lgb模型的参数,暂时不支持custom_metric
     def optuna_lgb(self,X,y,group,kf,metric):
@@ -219,18 +258,18 @@ class Yunbase():
                 params['gpu_use_dp']=True
             model_name='lgb'
             if self.objective=='regression':
-                mdeol=LGBMRegressor(**params)
+                model=LGBMRegressor(**params)
             else:
                 model=LGBMClassifier(**params)
             oof_preds,metric_score=self.fit_function(X,y,group,kf,model,model_name,use_optuna=True)
             return metric_score
         #优化最大值还是最小值
-        if self.metric in ['accuracy','auc']:
+        if self.metric in ['accuracy','auc','f1_score','mcc']:
             direction='maximize'
-        elif self.metric in ['rmse','mse']:
+        elif self.metric in ['medae','mae','rmse','mse','logloss','rmsle']:
             direction='minimize'
         else:
-            direction=self.direction
+            direction=self.optuna_direction
             
         #创建的研究命名,找最大值.
         study = optuna.create_study(direction=direction, study_name='find best lgb_params')
@@ -241,7 +280,7 @@ class Yunbase():
         best_params["extra_trees"]=True
         best_params["metric"]=metric
         best_params['random_state']=self.seed
-        print(best_params)
+        print(f"best_params={best_params}")
         return best_params
     
     #这个function会返回 oof_preds和metric_score,用于optuna找参数的.如果在使用optuna找参数,就不用保存预训练模型.
@@ -261,12 +300,12 @@ class Yunbase():
 
             if 'lgb' in model_name:
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
-                         callbacks=[log_evaluation(log),early_stopping(200)]
+                         callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
                     ) 
             elif 'cat' in model_name:
                 model.fit(X_train, y_train,
                       eval_set=(X_valid, y_valid),
-                      early_stopping_rounds=100, verbose=200)
+                      early_stopping_rounds=self.early_stop, verbose=200)
             elif 'xgb' in model_name:
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=200)
             else:#假设你还有其他的模型
@@ -290,11 +329,8 @@ class Yunbase():
         #提供的训练数据不是df表格
         if not isinstance(self.train, pd.DataFrame):
             raise ValueError("train_path_or_file is not pd.DataFrame")
+        print(f"len(train):{len(self.train)}")
         self.train=self.Feature_Engineer(self.train,mode='train')
-        
-        #二分类,多分类,回归
-        if self.objective not in ['binary','multi_class','regression']:
-            raise ValueError("Wrong or currently unsupported objective")
         
         #选择哪种交叉验证方法
         if self.objective=='binary' or self.objective=='multi_class':
@@ -341,6 +377,20 @@ class Yunbase():
             metric=self.metric
             if self.objective=='multi_class':
                 metric='multi_logloss'
+            #lightgbm不支持f1_score,但是最后调用Metric的时候会计算f1_score
+            if metric in ['f1_score','mcc','logloss']:
+                metric='auc'
+            elif metric=='medae':
+                metric='mae'
+            elif metric=='rmsle':
+                metric='mse'
+            if self.custom_metric!=None:#用custom_metric
+                if self.objective=='regression':
+                    metric='rmse'
+                elif self.objective=='binary':
+                    metric='auc'
+                elif self.objective=='multi_class':
+                    metric='accuracy'
             lgb_params={"boosting_type": "gbdt","metric": metric,
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.05,
                         "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
@@ -350,16 +400,44 @@ class Yunbase():
             if self.use_optuna_find_params:#如果要用optuna找lgb模型的参数
                 lgb_params=self.optuna_lgb(X,y,group,kf,metric)
             
+            
             #catboost的metric设置
+            # Valid options are: 'Logloss', 'CrossEntropy', 'CtrFactor', 'Focal', 'RMSE', 'LogCosh', 
+            # 'Lq', 'MAE', 'Quantile', 'MultiQuantile', 'Expectile', 'LogLinQuantile', 'MAPE', 
+            # 'Poisson', 'MSLE', 'MedianAbsoluteError', 'SMAPE', 'Huber', 'Tweedie', 'Cox', 
+            # 'RMSEWithUncertainty', 'MultiClass', 'MultiClassOneVsAll', 'PairLogit', 'PairLogitPairwise',
+            # 'YetiRank', 'YetiRankPairwise', 'QueryRMSE', 'GroupQuantile', 'QuerySoftMax', 
+            # 'QueryCrossEntropy', 'StochasticFilter', 'LambdaMart', 'StochasticRank', 
+            # 'PythonUserDefinedPerObject', 'PythonUserDefinedMultiTarget', 'UserPerObjMetric',
+            # 'UserQuerywiseMetric', 'R2', 'NumErrors', 'FairLoss', 'AUC', 'Accuracy', 'BalancedAccuracy',
+            # 'BalancedErrorRate', 'BrierScore', 'Precision', 'Recall', 'F1', 'TotalF1', 'F', 'MCC', 
+            # 'ZeroOneLoss', 'HammingLoss', 'HingeLoss', 'Kappa', 'WKappa', 'LogLikelihoodOfPrediction',
+            # 'NormalizedGini', 'PRAUC', 'PairAccuracy', 'AverageGain', 'QueryAverage', 'QueryAUC',
+            # 'PFound', 'PrecisionAt', 'RecallAt', 'MAP', 'NDCG', 'DCG', 'FilteredDCG', 'MRR', 'ERR', 
+            # 'SurvivalAft', 'MultiRMSE', 'MultiRMSEWithMissingValues', 'MultiLogloss', 'MultiCrossEntropy',
+            # 'Combination'. 
             if self.metric=='multi_logloss':
+                metric='MultiLogloss'
+            elif self.metric=='logloss':
                 metric='Logloss'
-            elif self.metric=='auc':
-                metric='AUC'
-            elif self.metric in ['rmse','mse']:
+            elif self.metric in ['mse','rmsle']:
                 metric='RMSE'
             elif self.metric=='accuracy':
                 metric='Accuracy'
-            cat_params={'eval_metric'         : metric,
+            elif self.metric=='f1_score':
+                metric='F1'
+            elif self.metric in ['auc','rmse','mcc','mae']:#catboost里是大写的评估指标
+                metric=metric.upper()
+            elif self.metric=='medae':
+                metric='MAE'
+            if self.custom_metric!=None:#用custom_metric
+                if self.objective=='regression':
+                    metric='RMSE'
+                else:
+                    metric='Logloss'
+            cat_params={
+                       'random_state':self.seed,
+                       'eval_metric'         : metric,
                        'bagging_temperature' : 0.50,
                        'iterations'          : 10000,
                        'learning_rate'       : 0.08,
@@ -370,11 +448,11 @@ class Yunbase():
                        'verbose'             : 0,
                       }
             
-            xgb_params={'random_state': 2024, 'n_estimators': 10000, 
+            xgb_params={'random_state': self.seed, 'n_estimators': 10000, 
                         'learning_rate': 0.01, 'max_depth': 10,
                         'reg_alpha': 0.08, 'reg_lambda': 0.8, 
                         'subsample': 0.95, 'colsample_bytree': 0.6, 
-                        'min_child_weight': 3,'early_stopping_rounds':100,
+                        'min_child_weight': 3,'early_stopping_rounds':self.early_stop,
                        }
             if self.device in ['cuda','gpu']:#gpu常见的写法
                 lgb_params['device']='gpu'
@@ -408,6 +486,7 @@ class Yunbase():
         #提供的训练数据不是df表格
         if not isinstance(self.test, pd.DataFrame):
             raise ValueError("test_path_or_file is not pd.DataFrame")
+        print(f"len(test):{len(self.test)}")
         self.test=self.Feature_Engineer(self.test,mode='test')
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         self.test=self.test.rename(columns=self.col2name)
@@ -442,6 +521,6 @@ class Yunbase():
         submission[self.target_col]=test_preds
         if self.objective!='regression':
             if self.metric!='auc':
-                submission[self.target_col]=submission[self.target_col].apply(lambda x:idx2target[x])
+                submission[self.target_col]=submission[self.target_col].apply(lambda x:self.idx2target[x])
         submission.to_csv("yunbase.csv",index=None)
         submission.head()
