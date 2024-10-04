@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/03
+@update_time:2024/10/04
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
@@ -36,6 +36,7 @@ class Yunbase():
                       use_optuna_find_params=0,
                       optuna_direction=None,
                       early_stop=100,
+                      use_pseudo_label=False,
                 ):
         """
         num_folds:是k折交叉验证的折数
@@ -56,6 +57,7 @@ class Yunbase():
         use_optuna_find_params:使用optuna找参数的迭代次数,如果为0则说明不找,目前只支持lightgbm模型.
         optuna_direction:'minimize'或者'maximize',评估指标是最大还是最小
         early_stop:早停的次数,如果模型迭代多少次没有改善就会停下来.
+        use_pseudo_label:是否用伪标签,就是在得到测试数据的预测结果后将测试数据加入训练数据再训练一次.
         """
         
         #目前支持的评估指标有
@@ -117,6 +119,8 @@ class Yunbase():
             raise ValueError("optuna_direction must be 'minimize' or 'maximize'")
         self.pretrained_models={}#用字典的方式保存已经训练好的模型
         self.early_stop=early_stop
+        self.test=None#初始化时没有测试数据.
+        self.use_pseudo_label=use_pseudo_label
         
     #遍历表格df的所有列修改数据类型减少内存使用
     def reduce_mem_usage(self,df, float16_as32=True):
@@ -280,6 +284,7 @@ class Yunbase():
         best_params["extra_trees"]=True
         best_params["metric"]=metric
         best_params['random_state']=self.seed
+        best_params['verbose']=-1
         print(f"best_params={best_params}")
         return best_params
     
@@ -298,6 +303,14 @@ class Yunbase():
             X_train, X_valid = X.iloc[train_index].reset_index(drop=True), X.iloc[valid_index].reset_index(drop=True)
             y_train, y_valid = y.iloc[train_index].reset_index(drop=True), y.iloc[valid_index].reset_index(drop=True)
 
+            #如果决定使用伪标签,并且已经得到测试数据的预测结果
+            #初始化的self.test=None,只有predict函数里self.test才会有数据,这时已经fit过了
+            if (self.use_pseudo_label) and (type(self.test)==pd.DataFrame):
+                test_X=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
+                test_y=self.test[self.target_col]
+                X_train=pd.concat((X_train,test_X),axis=0)
+                y_train=pd.concat((y_train,test_y),axis=0)
+            
             if 'lgb' in model_name:
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
@@ -321,6 +334,7 @@ class Yunbase():
         return oof_preds,metric_score
       
     def fit(self,train_path_or_file='train.csv'):
+        self.train_path_or_file=train_path_or_file
         try:#path试试
             self.train=pl.read_csv(train_path_or_file)
             self.train=self.train.to_pandas()
@@ -454,6 +468,7 @@ class Yunbase():
                         'subsample': 0.95, 'colsample_bytree': 0.6, 
                         'min_child_weight': 3,'early_stopping_rounds':self.early_stop,
                        }
+
             if self.device in ['cuda','gpu']:#gpu常见的写法
                 lgb_params['device']='gpu'
                 lgb_params['gpu_use_dp']=True
@@ -502,7 +517,26 @@ class Yunbase():
                     test_pred[i:i+self.infer_size]=model.predict(self.test[i:i+self.infer_size])
                 test_preds[fold]=test_pred
                 fold+=1
-            return test_preds.mean(axis=0)
+            test_preds=test_preds.mean(axis=0)
+            
+            #伪标签代码
+            if self.use_pseudo_label:
+                self.test[self.target_col]=test_preds
+                self.pretrained_models={}
+                self.fit(self.train_path_or_file)
+                
+                test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
+                fold=0
+                for (model_name,model) in self.pretrained_models.items():
+                    test_pred=np.zeros(len(self.test))
+                    for i in range(0,len(self.test),self.infer_size):
+                        test_pred[i:i+self.infer_size]=model.predict(self.test.drop([self.target_col],axis=1)[i:i+self.infer_size])
+                    test_preds[fold]=test_pred
+                    fold+=1
+                test_preds=test_preds.mean(axis=0)
+            
+            np.save('test_preds.npy',test_preds)
+            return test_preds
         else:#分类任务到底要的是什么
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
             fold=0
@@ -511,16 +545,34 @@ class Yunbase():
                 for i in range(0,len(self.test),self.infer_size):
                     test_pred[i:i+self.infer_size]=model.predict_proba(self.test[i:i+self.infer_size])
                 test_preds[fold]=test_pred
-                fold+=1
+                fold+=1   
+            test_preds=test_preds.mean(axis=0)#(len(test),self.num_classes)
+            
+            #伪标签代码
+            if self.use_pseudo_label:
+                self.test[self.target_col]=np.argmax(test_preds,axis=1)
+                self.pretrained_models={}
+                self.fit(self.train_path_or_file)
+
+                test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
+                fold=0
+                for (model_name,model) in self.pretrained_models.items():
+                    test_pred=np.zeros((len(self.test),self.num_classes))
+                    for i in range(0,len(self.test),self.infer_size):
+                        test_pred[i:i+self.infer_size]=model.predict_proba(self.test.drop([self.target_col],axis=1)[i:i+self.infer_size])
+                    test_preds[fold]=test_pred
+                    fold+=1
+                test_preds=test_preds.mean(axis=0)
             if self.metric=='auc':
-                return test_preds.mean(axis=0)[:,1]
-            test_preds=np.argmax(test_preds.mean(axis=0),axis=1)
+                return test_preds[:,1]
+            np.save('test_preds.npy',test_preds)
+            test_preds=np.argmax(test_preds,axis=1)
             return test_preds
-    def submit(self,submission_path='submission.csv',test_preds=None):
+    def submit(self,submission_path='submission.csv',test_preds=None,save_name='yunbase'):
         submission=pd.read_csv(submission_path)
         submission[self.target_col]=test_preds
         if self.objective!='regression':
             if self.metric!='auc':
                 submission[self.target_col]=submission[self.target_col].apply(lambda x:self.idx2target[x])
-        submission.to_csv("yunbase.csv",index=None)
+        submission.to_csv(f"{save_name}.csv",index=None)
         submission.head()
