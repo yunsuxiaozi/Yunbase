@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/04
+@update_time:2024/10/05
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
@@ -30,6 +30,7 @@ class Yunbase():
                       target_col='target',
                       infer_size=10000,
                       save_oof_preds=True,
+                      save_test_preds=True,
                       device='cpu',
                       one_hot_max=50,
                       custom_metric=None,
@@ -50,7 +51,8 @@ class Yunbase():
         num_classes:如果是分类任务,需要指定类别数量
         target_col:需要预测的那一列
         infer_size:测试数据可能内存太大,一次推理会出错,所以有了分批次预测.
-        save_oof_preds:是否保存交叉验证的结果用于后续的研究
+        save_oof_preds:是否保存交叉验证的结果用于后续的研究.
+        save_test_preds:是否保存测试数据的预测结果
         device:将树模型放在GPU还是CPU上训练.
         one_hot_max:一列特征的nunique少于多少做onehot处理.
         custom_metric:自定义评估指标,对于分类任务,输入的是y_true和预测出每个类别的概率分布.
@@ -105,6 +107,7 @@ class Yunbase():
         self.target_col=target_col
         self.infer_size=infer_size
         self.save_oof_preds=save_oof_preds
+        self.save_test_preds=save_test_preds
         self.num_classes=num_classes
         self.device=device.lower()
         if (self.objective=='binary') and self.num_classes!=2:
@@ -166,8 +169,8 @@ class Yunbase():
 
         return df
         
-    #对训练数据或者测试数据做特征工程,mode='train'或者'test'
-    def Feature_Engineer(self,df,mode='train'):
+    #对训练数据或者测试数据做特征工程,mode='train'或者'test' ,drop_cols是其他想删除的列名
+    def Feature_Engineer(self,df,mode='train',drop_cols=[]):
         if self.FE!=None:
             #你想添加的特征工程
             df=self.FE(df)
@@ -197,7 +200,7 @@ class Yunbase():
             df[f"{c}_{u}"]=(df[c]==u).astype(np.int8)
         
         #去除无用的列
-        df.drop(self.nan_cols+self.unique_cols+self.object_cols,axis=1,inplace=True,errors='ignore')
+        df.drop(self.nan_cols+self.unique_cols+self.object_cols+drop_cols,axis=1,inplace=True,errors='ignore')
         df=self.reduce_mem_usage(df, float16_as32=True)
         return df
     
@@ -265,7 +268,7 @@ class Yunbase():
                 model=LGBMRegressor(**params)
             else:
                 model=LGBMClassifier(**params)
-            oof_preds,metric_score=self.fit_function(X,y,group,kf,model,model_name,use_optuna=True)
+            oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,use_optuna=True)
             return metric_score
         #优化最大值还是最小值
         if self.metric in ['accuracy','auc','f1_score','mcc']:
@@ -289,7 +292,7 @@ class Yunbase():
         return best_params
     
     #这个function会返回 oof_preds和metric_score,用于optuna找参数的.如果在使用optuna找参数,就不用保存预训练模型.
-    def fit_function(self,X,y,group,kf,model,model_name,use_optuna=False):
+    def cross_validation(self,X,y,group,kf,model,model_name,use_optuna=False):
         log=100
         if use_optuna:
             log=10000
@@ -413,8 +416,7 @@ class Yunbase():
             #找到新的参数
             if self.use_optuna_find_params:#如果要用optuna找lgb模型的参数
                 lgb_params=self.optuna_lgb(X,y,group,kf,metric)
-            
-            
+             
             #catboost的metric设置
             # Valid options are: 'Logloss', 'CrossEntropy', 'CtrFactor', 'Focal', 'RMSE', 'LogCosh', 
             # 'Lq', 'MAE', 'Quantile', 'MultiQuantile', 'Expectile', 'LogLinQuantile', 'MAPE', 
@@ -487,12 +489,32 @@ class Yunbase():
                             ]
             
         for (model,model_name) in self.models:
-            oof_preds,metric_score=self.fit_function(X,y,group,kf,model,model_name,use_optuna=False)
+            oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,use_optuna=False)
             print(f"{self.metric}:{metric_score}")
             if self.save_oof_preds:#如果需要保存oof_preds
                 np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
         
-    def predict(self,test_path_or_file='test.csv'):
+    def predict(self,test_path_or_file='test.csv',weights=None):
+        #weights:[1]*len(self.models),几个模型的交叉验证就几个权重,下面会扩展到num_folds倍,后续也会对权重进行归一化处理.
+        
+        #如果你不设置权重,就按照普通的求平均来操作
+        if weights==None:
+            weights=np.ones(len(self.models))
+
+        if len(weights)!=len(self.models):
+            raise ValueError(f"length of weights must be {len(self.models)}")
+        weights=np.array([w for w in weights for f in range(self.num_folds)],dtype=np.float32)
+        #归一化
+        weights=weights*(self.num_folds*len(self.models))/np.sum(weights)
+
+        #计算oof分数             
+        oof_preds=0
+        for i in range(0,len(weights),self.num_folds):
+            oof_pred=np.load(f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
+            oof_preds+=weights[i]*oof_pred
+        oof_preds=oof_preds/len(self.models)
+        print(f"final_{self.metric}:{self.Metric(self.train[self.target_col].values,oof_preds)}")
+        
         try:#path试试
             self.test=pl.read_csv(test_path_or_file)
             self.test=self.test.to_pandas()
@@ -517,7 +539,7 @@ class Yunbase():
                     test_pred[i:i+self.infer_size]=model.predict(self.test[i:i+self.infer_size])
                 test_preds[fold]=test_pred
                 fold+=1
-            test_preds=test_preds.mean(axis=0)
+            test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             
             #伪标签代码
             if self.use_pseudo_label:
@@ -533,9 +555,10 @@ class Yunbase():
                         test_pred[i:i+self.infer_size]=model.predict(self.test.drop([self.target_col],axis=1)[i:i+self.infer_size])
                     test_preds[fold]=test_pred
                     fold+=1
-                test_preds=test_preds.mean(axis=0)
+                test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             
-            np.save('test_preds.npy',test_preds)
+            if self.save_test_preds:
+                np.save('test_preds.npy',test_preds)
             return test_preds
         else:#分类任务到底要的是什么
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
@@ -546,7 +569,7 @@ class Yunbase():
                     test_pred[i:i+self.infer_size]=model.predict_proba(self.test[i:i+self.infer_size])
                 test_preds[fold]=test_pred
                 fold+=1   
-            test_preds=test_preds.mean(axis=0)#(len(test),self.num_classes)
+            test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
             
             #伪标签代码
             if self.use_pseudo_label:
@@ -562,10 +585,11 @@ class Yunbase():
                         test_pred[i:i+self.infer_size]=model.predict_proba(self.test.drop([self.target_col],axis=1)[i:i+self.infer_size])
                     test_preds[fold]=test_pred
                     fold+=1
-                test_preds=test_preds.mean(axis=0)
+                test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             if self.metric=='auc':
                 return test_preds[:,1]
-            np.save('test_preds.npy',test_preds)
+            if self.save_test_preds:
+                np.save('test_preds.npy',test_preds)
             test_preds=np.argmax(test_preds,axis=1)
             return test_preds
     def submit(self,submission_path='submission.csv',test_preds=None,save_name='yunbase'):
