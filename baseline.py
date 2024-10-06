@@ -1,7 +1,8 @@
+
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/05
+@update_time:2024/10/06
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
@@ -21,6 +22,7 @@ class Yunbase():
     def __init__(self,num_folds=5,
                       models=[],
                       FE=None,
+                      drop_cols=[],
                       seed=2024,
                       objective='regression',
                       metric='mse',
@@ -42,7 +44,8 @@ class Yunbase():
         """
         num_folds:是k折交叉验证的折数
         models:我这里已经设置了基本的模型作为baseline,你也可以使用你自己想使用的模型
-        FE:除了我这里已经做了的基本的特征工程以外,你可以自定义你需要的特征工程的函数
+        FE:除了我这里已经做了的基本的特征工程以外,你可以自定义你需要的特征工程的函数.
+        drop_cols:所有的特征工程(你的自定义特征工程+内置的特征工程)完成之后想要删除的列.
         seed:随机种子
         objective:你想做的任务是什么?,regression,binary还是multi_class
         metric:你想使用的评估指标
@@ -86,6 +89,7 @@ class Yunbase():
         self.seed=seed
         self.models=models
         self.FE=FE
+        self.drop_cols=drop_cols
         
         self.objective=objective.lower()
         #二分类,多分类,回归
@@ -347,7 +351,7 @@ class Yunbase():
         if not isinstance(self.train, pd.DataFrame):
             raise ValueError("train_path_or_file is not pd.DataFrame")
         print(f"len(train):{len(self.train)}")
-        self.train=self.Feature_Engineer(self.train,mode='train')
+        self.train=self.Feature_Engineer(self.train,mode='train',self.drop_cols)
         
         #选择哪种交叉验证方法
         if self.objective=='binary' or self.objective=='multi_class':
@@ -524,7 +528,7 @@ class Yunbase():
         if not isinstance(self.test, pd.DataFrame):
             raise ValueError("test_path_or_file is not pd.DataFrame")
         print(f"len(test):{len(self.test)}")
-        self.test=self.Feature_Engineer(self.test,mode='test')
+        self.test=self.Feature_Engineer(self.test,mode='test',self.drop_cols)
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         self.test=self.test.rename(columns=self.col2name)
         for col in self.test.columns:
