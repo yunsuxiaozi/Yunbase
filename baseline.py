@@ -351,7 +351,7 @@ class Yunbase():
         if not isinstance(self.train, pd.DataFrame):
             raise ValueError("train_path_or_file is not pd.DataFrame")
         print(f"len(train):{len(self.train)}")
-        self.train=self.Feature_Engineer(self.train,mode='train',self.drop_cols)
+        self.train=self.Feature_Engineer(self.train,mode='train',drop_cols=self.drop_cols)
         
         #选择哪种交叉验证方法
         if self.objective=='binary' or self.objective=='multi_class':
@@ -528,7 +528,7 @@ class Yunbase():
         if not isinstance(self.test, pd.DataFrame):
             raise ValueError("test_path_or_file is not pd.DataFrame")
         print(f"len(test):{len(self.test)}")
-        self.test=self.Feature_Engineer(self.test,mode='test',self.drop_cols)
+        self.test=self.Feature_Engineer(self.test,mode='test',drop_cols=self.drop_cols)
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         self.test=self.test.rename(columns=self.col2name)
         for col in self.test.columns:
