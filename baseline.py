@@ -1,8 +1,7 @@
-
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/06
+@update_time:2024/10/07
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
@@ -40,6 +39,7 @@ class Yunbase():
                       optuna_direction=None,
                       early_stop=100,
                       use_pseudo_label=False,
+                      use_high_correlation_feature=True,
                 ):
         """
         num_folds:是k折交叉验证的折数
@@ -48,7 +48,7 @@ class Yunbase():
         drop_cols:所有的特征工程(你的自定义特征工程+内置的特征工程)完成之后想要删除的列.
         seed:随机种子
         objective:你想做的任务是什么?,regression,binary还是multi_class
-        metric:你想使用的评估指标
+        metric:你想使用的评估指标.
         nan_margin:一列缺失值大于多少选择不要
         group_col:groupkfold需要有一列作为group
         num_classes:如果是分类任务,需要指定类别数量
@@ -63,6 +63,7 @@ class Yunbase():
         optuna_direction:'minimize'或者'maximize',评估指标是最大还是最小
         early_stop:早停的次数,如果模型迭代多少次没有改善就会停下来.
         use_pseudo_label:是否用伪标签,就是在得到测试数据的预测结果后将测试数据加入训练数据再训练一次.
+        use_high_correlation_feature:bool类型的变量,你是否要保留训练数据中高相关性的特征,如果要保留,为True,反之为False.
         """
         
         #目前支持的评估指标有
@@ -106,12 +107,16 @@ class Yunbase():
         
         self.nan_margin=nan_margin
         if self.nan_margin<0 or self.nan_margin>1:
-            raise ValueError("self.nan_margin must be within the range of 0 to 1")
+            raise ValueError("nan_margin must be within the range of 0 to 1")
         self.group_col=group_col
         self.target_col=target_col
         self.infer_size=infer_size
         self.save_oof_preds=save_oof_preds
+        if self.save_oof_preds not in [True,False]:
+            raise ValueError("save_oof_preds must be True or False")  
         self.save_test_preds=save_test_preds
+        if self.save_test_preds not in [True,False]:
+            raise ValueError("save_test_preds must be True or False")
         self.num_classes=num_classes
         self.device=device.lower()
         if (self.objective=='binary') and self.num_classes!=2:
@@ -128,6 +133,7 @@ class Yunbase():
         self.early_stop=early_stop
         self.test=None#初始化时没有测试数据.
         self.use_pseudo_label=use_pseudo_label
+        self.use_high_correlation_feature=use_high_correlation_feature
         
     #遍历表格df的所有列修改数据类型减少内存使用
     def reduce_mem_usage(self,df, float16_as32=True):
@@ -202,6 +208,9 @@ class Yunbase():
         for i in range(len(self.nunique_2_cols)):
             c,u=self.nunique_2_cols[i]
             df[f"{c}_{u}"]=(df[c]==u).astype(np.int8)
+            
+        if (mode=='train') and (self.use_high_correlation_feature==False):#如果需要删除高相关性的特征
+            self.drop_high_correlation_feats(df)
         
         #去除无用的列
         df.drop(self.nan_cols+self.unique_cols+self.object_cols+drop_cols,axis=1,inplace=True,errors='ignore')
@@ -325,9 +334,9 @@ class Yunbase():
             elif 'cat' in model_name:
                 model.fit(X_train, y_train,
                       eval_set=(X_valid, y_valid),
-                      early_stopping_rounds=self.early_stop, verbose=200)
+                      early_stopping_rounds=self.early_stop, verbose=log)
             elif 'xgb' in model_name:
-                model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=200)
+                model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=log)
             else:#假设你还有其他的模型
                 model.fit(X_train,y_train) 
 
@@ -339,7 +348,22 @@ class Yunbase():
                 self.pretrained_models[f'{model_name}_fold{fold}']=model
         metric_score=self.Metric(y.values,oof_preds)
         return oof_preds,metric_score
-      
+    
+    def drop_high_correlation_feats(self,df):
+        #target_col和group_col都是模型训练要用的,不能删,object特征计算不了相关性
+        #这里相关性定死0.99,毕竟低于这个值的特征还是有信息的,可以用PCA之类的降维方法.
+        #如果你需要删除其他高相关性的特征,可以自行添加进初始化参数drop_cols中.
+        numerical_cols=[col for col in df.columns if (col not in [self.target_col,self.group_col]) and df[col].dtype!=object]
+        corr_matrix=df[numerical_cols].corr().values
+        drop_cols=[]
+        for i in range(len(corr_matrix)):
+            for j in range(i+1,len(corr_matrix)):
+                if abs(corr_matrix[i][j])>=0.99:
+                    drop_cols.append(numerical_cols[j])
+        #加入drop_cols中,后续特征工程结束一起drop
+        print(f"drop_cols={drop_cols}")
+        self.drop_cols+=drop_cols
+    
     def fit(self,train_path_or_file='train.csv'):
         self.train_path_or_file=train_path_or_file
         try:#path试试
@@ -391,6 +415,8 @@ class Yunbase():
             group=self.train[self.group_col]
         else:
             group=None
+        #存储训练集真实的标签,因为有target2idx的操作,用于最后算final_score    
+        self.target=y.values
         
         #模型的训练,如果你自己准备了模型,那就用你的模型,否则就用我的模型
         if len(self.models)==0:
@@ -411,7 +437,7 @@ class Yunbase():
                 elif self.objective=='binary':
                     metric='auc'
                 elif self.objective=='multi_class':
-                    metric='accuracy'
+                    metric='multi_logloss'
             lgb_params={"boosting_type": "gbdt","metric": metric,
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.05,
                         "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
@@ -437,7 +463,7 @@ class Yunbase():
             # 'SurvivalAft', 'MultiRMSE', 'MultiRMSEWithMissingValues', 'MultiLogloss', 'MultiCrossEntropy',
             # 'Combination'. 
             if self.metric=='multi_logloss':
-                metric='MultiLogloss'
+                metric='Accuracy'
             elif self.metric=='logloss':
                 metric='Logloss'
             elif self.metric in ['mse','rmsle']:
@@ -453,8 +479,11 @@ class Yunbase():
             if self.custom_metric!=None:#用custom_metric
                 if self.objective=='regression':
                     metric='RMSE'
-                else:
+                elif self.objective=='binary':
                     metric='Logloss'
+                else:
+                    metric='Accuracy'
+                    
             cat_params={
                        'random_state':self.seed,
                        'eval_metric'         : metric,
@@ -512,12 +541,12 @@ class Yunbase():
         weights=weights*(self.num_folds*len(self.models))/np.sum(weights)
 
         #计算oof分数             
-        oof_preds=0
+        oof_preds=np.zeros_like(np.load(f"{self.models[0//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy"))
         for i in range(0,len(weights),self.num_folds):
             oof_pred=np.load(f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
             oof_preds+=weights[i]*oof_pred
         oof_preds=oof_preds/len(self.models)
-        print(f"final_{self.metric}:{self.Metric(self.train[self.target_col].values,oof_preds)}")
+        print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
         
         try:#path试试
             self.test=pl.read_csv(test_path_or_file)
