@@ -1,7 +1,8 @@
+
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/07
+@update_time:2024/10/13
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
@@ -14,6 +15,7 @@ from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor,CatBoostClassifier
 from xgboost import XGBRegressor,XGBClassifier
+import dill#对对象进行序列化和反序列化(例如保存和加载树模型)
 import optuna#自动超参数优化框架
 import warnings#避免一些可以忽略的报错
 warnings.filterwarnings('ignore')#filterwarnings()方法是用于设置警告过滤器的方法，它可以控制警告信息的输出方式和级别。
@@ -129,11 +131,24 @@ class Yunbase():
         #如果你要用optuna找参数并且自定义评估指标,却不说评估指标要最大还是最小,就要报错.
         if (self.use_optuna_find_params) and (self.custom_metric!=None) and self.optuna_direction not in ['minimize','maximize']:
             raise ValueError("optuna_direction must be 'minimize' or 'maximize'")
-        self.pretrained_models={}#用字典的方式保存已经训练好的模型
+        self.model_paths=[]#保存模型的路径
         self.early_stop=early_stop
         self.test=None#初始化时没有测试数据.
         self.use_pseudo_label=use_pseudo_label
         self.use_high_correlation_feature=use_high_correlation_feature
+
+    #保存训练好的树模型,obj是保存的模型,path是需要保存的路径
+    def pickle_dump(self,obj, path):
+        #打开指定的路径path,binary write(二进制写入)
+        with open(path, mode="wb") as f:
+            #将obj对象保存到f,使用协议版本4进行序列化
+            dill.dump(obj, f, protocol=4)
+    def pickle_load(self,path):
+        #打开指定的路径path,binary read(二进制读取)
+        with open(path, mode="rb") as f:
+            #按照制定路径去加载模型
+            data = dill.load(f)
+            return data
         
     #遍历表格df的所有列修改数据类型减少内存使用
     def reduce_mem_usage(self,df, float16_as32=True):
@@ -345,7 +360,8 @@ class Yunbase():
             else:
                 oof_preds[valid_index]=model.predict_proba(X_valid)
             if not use_optuna:#如果没有在找参数
-                self.pretrained_models[f'{model_name}_fold{fold}']=model
+                self.pickle_dump(model,f'{model_name}_fold{fold}.model')
+                self.model_paths.append((model_name,fold))
         metric_score=self.Metric(y.values,oof_preds)
         return oof_preds,metric_score
     
@@ -566,7 +582,8 @@ class Yunbase():
         if self.objective=='regression':
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             fold=0
-            for (model_name,model) in self.pretrained_models.items():
+            for (model_name,fold) in self.model_paths:
+                model=self.pickle_load(f'{model_name}_fold{fold}.model')
                 test_pred=np.zeros(len(self.test))
                 for i in range(0,len(self.test),self.infer_size):
                     test_pred[i:i+self.infer_size]=model.predict(self.test[i:i+self.infer_size])
@@ -577,12 +594,13 @@ class Yunbase():
             #伪标签代码
             if self.use_pseudo_label:
                 self.test[self.target_col]=test_preds
-                self.pretrained_models={}
+                self.model_paths=[]
                 self.fit(self.train_path_or_file)
                 
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
                 fold=0
-                for (model_name,model) in self.pretrained_models.items():
+                for (model_name,fold) in self.model_paths:
+                    model=self.pickle_load(f'{model_name}_fold{fold}.model')
                     test_pred=np.zeros(len(self.test))
                     for i in range(0,len(self.test),self.infer_size):
                         test_pred[i:i+self.infer_size]=model.predict(self.test.drop([self.target_col],axis=1)[i:i+self.infer_size])
@@ -596,7 +614,8 @@ class Yunbase():
         else:#分类任务到底要的是什么
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
             fold=0
-            for (model_name,model) in self.pretrained_models.items():
+            for (model_name,fold) in self.model_paths:
+                model=self.pickle_load(f'{model_name}_fold{fold}.model')
                 test_pred=np.zeros((len(self.test),self.num_classes))
                 for i in range(0,len(self.test),self.infer_size):
                     test_pred[i:i+self.infer_size]=model.predict_proba(self.test[i:i+self.infer_size])
@@ -607,12 +626,13 @@ class Yunbase():
             #伪标签代码
             if self.use_pseudo_label:
                 self.test[self.target_col]=np.argmax(test_preds,axis=1)
-                self.pretrained_models={}
+                self.model_paths=[]
                 self.fit(self.train_path_or_file)
 
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
                 fold=0
-                for (model_name,model) in self.pretrained_models.items():
+                for (model_name,fold) in self.model_paths:
+                    model=self.pickle_load(f'{model_name}_fold{fold}.model')
                     test_pred=np.zeros((len(self.test),self.num_classes))
                     for i in range(0,len(self.test),self.infer_size):
                         test_pred[i:i+self.infer_size]=model.predict_proba(self.test.drop([self.target_col],axis=1)[i:i+self.infer_size])
