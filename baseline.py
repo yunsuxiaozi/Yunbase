@@ -1,4 +1,3 @@
-
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
@@ -545,23 +544,23 @@ class Yunbase():
         
     def predict(self,test_path_or_file='test.csv',weights=None):
         #weights:[1]*len(self.models),几个模型的交叉验证就几个权重,下面会扩展到num_folds倍,后续也会对权重进行归一化处理.
-        
+        n=len(self.models)
         #如果你不设置权重,就按照普通的求平均来操作
         if weights==None:
-            weights=np.ones(len(self.models))
+            weights=np.ones(n)
 
-        if len(weights)!=len(self.models):
-            raise ValueError(f"length of weights must be {len(self.models)}")
+        if len(weights)!=n:
+            raise ValueError(f"length of weights must be len(models)")
         weights=np.array([w for w in weights for f in range(self.num_folds)],dtype=np.float32)
         #归一化
-        weights=weights*(self.num_folds*len(self.models))/np.sum(weights)
+        weights=weights*(self.num_folds*n)/np.sum(weights)
 
         #计算oof分数             
         oof_preds=np.zeros_like(np.load(f"{self.models[0//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy"))
         for i in range(0,len(weights),self.num_folds):
             oof_pred=np.load(f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
             oof_preds+=weights[i]*oof_pred
-        oof_preds=oof_preds/len(self.models)
+        oof_preds=oof_preds/n
         print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
         
         try:#path试试
@@ -645,6 +644,62 @@ class Yunbase():
                 np.save('test_preds.npy',test_preds)
             test_preds=np.argmax(test_preds,axis=1)
             return test_preds
+
+    #集成很多solution
+    def ensemble(self,solution_paths_or_files,weights=None):
+        #如果你不设置权重,就按照普通的求平均来操作
+        n=len(solution_paths_or_files)
+        if weights==None:
+            weights=np.ones(n)
+        if len(weights)!=n:
+            raise ValueError(f"length of weights must be len(solution_paths_or_files)")
+        #归一化
+        weights=weights/np.sum(weights)
+
+        #连续值加权求和
+        if (self.objective=='regression') or(self.metric=='auc'):
+            final_solutions=[]
+            for i in range(n):
+                try:#path试试
+                    solution=pl.read_csv(solution_paths_or_files[i])
+                    solution=solution.to_pandas()
+                except:#csv_file
+                    solution=solution_paths_or_files[i]
+                #提供的训练数据不是df表格
+                if not isinstance(solution, pd.DataFrame):
+                    raise ValueError("solution_paths_or_files is not pd.DataFrame")
+                final_solutions.append(weights[i]*solution[self.target_col].values)
+            final_solutions=np.sum(final_solutions,axis=0)
+            return final_solutions
+        else:#离散值(分类任务)求众数
+            #n个solution,m个数据
+            solutions=[]
+            for i in range(n):
+                try:#path试试
+                    solution=pl.read_csv(solution_paths_or_files[i])
+                    solution=solution.to_pandas()
+                except:#csv_file
+                    solution=solution_paths_or_files[i]
+                #提供的训练数据不是df表格
+                if not isinstance(solution, pd.DataFrame):
+                    raise ValueError("solution_paths_or_files is not pd.DataFrame")
+                solutions.append(solution[self.target_col].values)
+            final_solutions=[]
+            for i in range(len(solutions[0])):
+                solution2count={}
+                #第i个数据第j个solution
+                for j in range(n):
+                    if solutions[j][i] in solution2count.keys():
+                        solution2count[ solutions[j][i] ]+=weights[j]
+                    else:
+                        solution2count[ solutions[j][i] ]=weights[j]
+                solution2count=dict(sorted(solution2count.items(),key=lambda x:-x[1]))
+                print(solution2count)
+                final_solutions.append(list(solution2count.keys())[0])
+            final_solutions=np.array(final_solutions)
+            return final_solutions
+            
+            
     def submit(self,submission_path='submission.csv',test_preds=None,save_name='yunbase'):
         submission=pd.read_csv(submission_path)
         submission[self.target_col]=test_preds
