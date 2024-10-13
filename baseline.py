@@ -581,14 +581,14 @@ class Yunbase():
                 self.test[col]=self.test[col].astype(np.float32)
         if self.objective=='regression':
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
-            fold=0
+            cnt=0
             for (model_name,fold) in self.model_paths:
                 model=self.pickle_load(f'{model_name}_fold{fold}.model')
                 test_pred=np.zeros(len(self.test))
                 for i in range(0,len(self.test),self.infer_size):
                     test_pred[i:i+self.infer_size]=model.predict(self.test[i:i+self.infer_size])
-                test_preds[fold]=test_pred
-                fold+=1
+                test_preds[cnt]=test_pred
+                cnt+=1
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             
             #伪标签代码
@@ -598,14 +598,14 @@ class Yunbase():
                 self.fit(self.train_path_or_file)
                 
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
-                fold=0
+                cnt=0
                 for (model_name,fold) in self.model_paths:
                     model=self.pickle_load(f'{model_name}_fold{fold}.model')
                     test_pred=np.zeros(len(self.test))
                     for i in range(0,len(self.test),self.infer_size):
                         test_pred[i:i+self.infer_size]=model.predict(self.test.drop([self.target_col],axis=1)[i:i+self.infer_size])
-                    test_preds[fold]=test_pred
-                    fold+=1
+                    test_preds[cnt]=test_pred
+                    cnt+=1
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             
             if self.save_test_preds:
@@ -613,14 +613,14 @@ class Yunbase():
             return test_preds
         else:#分类任务到底要的是什么
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
-            fold=0
+            cnt=0
             for (model_name,fold) in self.model_paths:
                 model=self.pickle_load(f'{model_name}_fold{fold}.model')
                 test_pred=np.zeros((len(self.test),self.num_classes))
                 for i in range(0,len(self.test),self.infer_size):
                     test_pred[i:i+self.infer_size]=model.predict_proba(self.test[i:i+self.infer_size])
-                test_preds[fold]=test_pred
-                fold+=1   
+                test_preds[cnt]=test_pred
+                cnt+=1   
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
             
             #伪标签代码
