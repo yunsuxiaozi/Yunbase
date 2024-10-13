@@ -535,6 +535,10 @@ class Yunbase():
                              (CatBoostClassifier(**cat_params),'cat'),
                              (XGBClassifier(**xgb_params),'xgb'),
                             ]
+                
+            print(f"lgb_params:{lgb_params}")
+            print(f"xgb_params:{xgb_params}")
+            print(f"cat_params:{cat_params}")
             
         for (model,model_name) in self.models:
             oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,use_optuna=False)
@@ -694,12 +698,10 @@ class Yunbase():
                     else:
                         solution2count[ solutions[j][i] ]=weights[j]
                 solution2count=dict(sorted(solution2count.items(),key=lambda x:-x[1]))
-                print(solution2count)
                 final_solutions.append(list(solution2count.keys())[0])
             final_solutions=np.array(final_solutions)
             return final_solutions
-            
-            
+                
     def submit(self,submission_path='submission.csv',test_preds=None,save_name='yunbase'):
         submission=pd.read_csv(submission_path)
         submission[self.target_col]=test_preds
