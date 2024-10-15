@@ -1,13 +1,16 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/13
+@update_time:2024/10/15
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
 import numpy as np#对矩阵进行科学计算的库
 #这里使用groupkfold
 from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,GroupKFold
+from sklearn.preprocessing import LabelEncoder#类别标签转换成数值.
+
+
 #二分类常用的评估指标
 from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
 #model lightgbm回归模型,日志评估
@@ -41,6 +44,7 @@ class Yunbase():
                       early_stop=100,
                       use_pseudo_label=False,
                       use_high_correlation_feature=True,
+                      labelencoder_cols=[]
                 ):
         """
         num_folds:是k折交叉验证的折数
@@ -65,6 +69,7 @@ class Yunbase():
         early_stop:早停的次数,如果模型迭代多少次没有改善就会停下来.
         use_pseudo_label:是否用伪标签,就是在得到测试数据的预测结果后将测试数据加入训练数据再训练一次.
         use_high_correlation_feature:bool类型的变量,你是否要保留训练数据中高相关性的特征,如果要保留,为True,反之为False.
+        labelencoder_cols:一般是字符串类型的类别型变量,转换成[1,2,3]
         """
         
         #目前支持的评估指标有
@@ -135,6 +140,7 @@ class Yunbase():
         self.test=None#初始化时没有测试数据.
         self.use_pseudo_label=use_pseudo_label
         self.use_high_correlation_feature=use_high_correlation_feature
+        self.labelencoder_cols=labelencoder_cols
 
     #保存训练好的树模型,obj是保存的模型,path是需要保存的路径
     def pickle_dump(self,obj, path):
@@ -194,7 +200,7 @@ class Yunbase():
         return df
         
     #对训练数据或者测试数据做特征工程,mode='train'或者'test' ,drop_cols是其他想删除的列名
-    def Feature_Engineer(self,df,mode='train',drop_cols=[]):
+    def base_FE(self,df,mode='train',drop_cols=[]):
         if self.FE!=None:
             #你想添加的特征工程
             df=self.FE(df)
@@ -214,7 +220,7 @@ class Yunbase():
                         self.one_hot_cols.append([col,list(df[col].unique())]) 
                     elif df[col].nunique()==2:
                         self.nunique_2_cols.append([col,list(df[col].unique())[0]])
-                    
+        print("one hot encoder")          
         for i in range(len(self.one_hot_cols)):
             col,nunique=self.one_hot_cols[i]
             for u in nunique:
@@ -223,12 +229,25 @@ class Yunbase():
             c,u=self.nunique_2_cols[i]
             df[f"{c}_{u}"]=(df[c]==u).astype(np.int8)
             
+        #labelencoder
+        print("label encoder")
+        for col in self.labelencoder_cols:
+            if mode=='train':#训练的时候
+                le=LabelEncoder()
+                le.fit(df[col])#对id这列进行拟合
+                self.pickle_dump(le,f'le_{col}.model')
+            else:
+                le=self.pickle_load(f'le_{col}.model')   
+            df[col+"_le"] = le.transform(df[col])
+            
         if (mode=='train') and (self.use_high_correlation_feature==False):#如果需要删除高相关性的特征
             self.drop_high_correlation_feats(df)
         
         #去除无用的列
+        print("drop useless cols")
         df.drop(self.nan_cols+self.unique_cols+self.object_cols+drop_cols,axis=1,inplace=True,errors='ignore')
         df=self.reduce_mem_usage(df, float16_as32=True)
+        print("-"*30)
         return df
     
     def Metric(self,y_true,y_pred):#对于分类任务是标签和预测的每个类别的概率
@@ -384,13 +403,20 @@ class Yunbase():
         try:#path试试
             self.train=pl.read_csv(train_path_or_file)
             self.train=self.train.to_pandas()
-        except:#csv_file
-            self.train=train_path_or_file
+        except:#csv_file 或者parquet
+            try:
+                self.train=pl.read_parquet(train_path_or_file)
+                self.train=self.train.to_pandas()
+            except:
+                self.train=train_path_or_file
+        #如果是polars文件,转成pandas
+        if isinstance(self.train, pl.DataFrame):
+            self.train=self.train.to_pandas()
         #提供的训练数据不是df表格
         if not isinstance(self.train, pd.DataFrame):
             raise ValueError("train_path_or_file is not pd.DataFrame")
         print(f"len(train):{len(self.train)}")
-        self.train=self.Feature_Engineer(self.train,mode='train',drop_cols=self.drop_cols)
+        self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
         
         #选择哪种交叉验证方法
         if self.objective=='binary' or self.objective=='multi_class':
@@ -411,6 +437,7 @@ class Yunbase():
         for i in range(len(list(X.columns))):
             self.col2name[list(X.columns)[i]]=f'col_{i}'
         X=X.rename(columns=self.col2name)
+        print(f"feature_count:{len(list(X.columns))}")
         
         for col in X.columns:
             if X[col].dtype==object:
@@ -570,13 +597,20 @@ class Yunbase():
         try:#path试试
             self.test=pl.read_csv(test_path_or_file)
             self.test=self.test.to_pandas()
-        except:#file
-            self.test=test_path_or_file
+        except:#
+            try:#path试试
+                self.test=pl.read_parquet(test_path_or_file)
+                self.test=self.test.to_pandas()
+            except:#
+                self.test=test_path_or_file
+        #如果是polars文件,转成pandas
+        if isinstance(self.test, pl.DataFrame):
+            self.test=self.test.to_pandas()
         #提供的训练数据不是df表格
         if not isinstance(self.test, pd.DataFrame):
             raise ValueError("test_path_or_file is not pd.DataFrame")
         print(f"len(test):{len(self.test)}")
-        self.test=self.Feature_Engineer(self.test,mode='test',drop_cols=self.drop_cols)
+        self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         self.test=self.test.rename(columns=self.col2name)
         for col in self.test.columns:
