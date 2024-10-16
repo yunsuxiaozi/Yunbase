@@ -1,16 +1,14 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/15
+@update_time:2024/10/16
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
 import numpy as np#对矩阵进行科学计算的库
 #这里使用groupkfold
 from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,GroupKFold
-from sklearn.preprocessing import LabelEncoder#类别标签转换成数值.
-
-
+import ast#解析python的列表字符串'[a,b,c]'->[a,b,c]
 #二分类常用的评估指标
 from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
 #model lightgbm回归模型,日志评估
@@ -44,7 +42,10 @@ class Yunbase():
                       early_stop=100,
                       use_pseudo_label=False,
                       use_high_correlation_feature=True,
-                      labelencoder_cols=[]
+                      labelencoder_cols=[],
+                      list_cols=[],
+                      list_gaps=[1],
+                      word2vec_models=[],
                 ):
         """
         num_folds:是k折交叉验证的折数
@@ -70,6 +71,9 @@ class Yunbase():
         use_pseudo_label:是否用伪标签,就是在得到测试数据的预测结果后将测试数据加入训练数据再训练一次.
         use_high_correlation_feature:bool类型的变量,你是否要保留训练数据中高相关性的特征,如果要保留,为True,反之为False.
         labelencoder_cols:一般是字符串类型的类别型变量,转换成[1,2,3]
+        list_cols:一般情况下为空列表,如果表格数据某列的特征是列表[1,2,3]或者"[1,2,3]",可以使用这个参数来提取特征.
+        list_gaps:初始化考虑1阶的diff特征,空列表,也可以是[1,2,4]之类的.
+        word2vec_models:使用例如tfidf之类的模型,例如:[(TfidfVectorizer(),col,model_name)]
         """
         
         #目前支持的评估指标有
@@ -141,6 +145,12 @@ class Yunbase():
         self.use_pseudo_label=use_pseudo_label
         self.use_high_correlation_feature=use_high_correlation_feature
         self.labelencoder_cols=labelencoder_cols
+        self.load_path=""#模型训练和推理分开的时候加载模型的文件夹路径,predict传入的参数
+        self.list_cols=list(set(list_cols))
+        self.list_gaps=sorted(list_gaps)#从小到大排序
+        self.word2vec_models=word2vec_models
+        self.word2vec_cols=[]#存储需要做word2vec特征的列名,在CV_FE里使用
+        self.col2name=None#由于数据中有些列名可能不能传入lgb模型,故需要做转换
 
     #保存训练好的树模型,obj是保存的模型,path是需要保存的路径
     def pickle_dump(self,obj, path):
@@ -208,14 +218,14 @@ class Yunbase():
             #缺失值太多
             self.nan_cols=[col for col in df.columns if df[col].isna().mean()>self.nan_margin]
             #nunique=1
-            self.unique_cols=[col for col in df.columns if df[col].nunique()==1]
+            self.unique_cols=[col for col in df.drop(self.list_cols,axis=1,errors='ignore').columns if(df[col].nunique()==1)]
             #如果一列是object列,那肯定不能放入模型进行学习
             self.object_cols=[col for col in df.columns if (df[col].dtype==object) and (col!=self.group_col)]
             #one_hot_cols
             self.one_hot_cols=[]
             self.nunique_2_cols=[]
             for col in df.columns:
-                if col!=self.target_col and col!=self.group_col:
+                if col not in [self.target_col,self.group_col]+self.list_cols:
                     if (df[col].nunique()<self.one_hot_max) and (df[col].nunique()>2):
                         self.one_hot_cols.append([col,list(df[col].unique())]) 
                     elif df[col].nunique()==2:
@@ -228,27 +238,112 @@ class Yunbase():
         for i in range(len(self.nunique_2_cols)):
             c,u=self.nunique_2_cols[i]
             df[f"{c}_{u}"]=(df[c]==u).astype(np.int8)
-            
-        #labelencoder
-        print("label encoder")
-        for col in self.labelencoder_cols:
-            if mode=='train':#训练的时候
-                le=LabelEncoder()
-                le.fit(df[col])#对id这列进行拟合
-                self.pickle_dump(le,f'le_{col}.model')
-            else:
-                le=self.pickle_load(f'le_{col}.model')   
-            df[col+"_le"] = le.transform(df[col])
-            
+        
+        if len(self.list_cols):
+            print("list feature")
+            for col in self.list_cols:
+                try:#如果是列表字符串'[a,b]'解析成[a,b]
+                    df[col]=df[col].apply(lambda x:ast.literal_eval(x))
+                except:#原始数据是列表,或者不能被解析
+                    #找到第一个不是nan的值,是列表就说明没错,否则报错
+                    for i in range(len(df)):
+                        v=df[col].values[i]
+                        if v==v:#找到第一个不是NAN的值
+                            if not isinstance(v, list):
+                                raise ValueError(f"col '{col}' not a list")
+                #列表的原始特征构造
+                df[f'{col}_len']=df[col].apply(len)
+                df[f'first_{col}']=df[col].apply(lambda x:x[0])
+                df[f'last_{col}']=df[col].apply(lambda x:x[-1])
+                df[f'mean_{col}']=df[col].apply(lambda x:np.nanmean(x))
+                df[f'median_{col}']=df[col].apply(lambda x:np.nanmedian(x))
+                df[f'max_{col}']=df[col].apply(lambda x:np.nanmax(x))
+                df[f'min_{col}']=df[col].apply(lambda x:np.nanmin(x))
+                df[f'std_{col}']=df[col].apply(lambda x:np.nanstd(x))
+                df[f'sum_{col}']=df[col].apply(lambda x:np.nansum(x))
+                df[f'ptp_{col}']=df[f'max_{col}']-df[f'min_{col}']
+                df[f'mean_{col}/std_{col}']=df[f'mean_{col}']/df[f'std_{col}']
+                #列表的gap特征构造
+                def get_list(l):
+                    if len(self.list_gaps)==0:
+                        return l
+                    elif len(l)<self.list_gaps[-1]:
+                        return l+[np.nan]*(self.list_gaps[-1]-len(l))
+                    else:
+                        return l
+                df[col]=df[col].apply(lambda l:get_list(l))
+                for gap in self.list_gaps:
+                    v=df[col].values
+                    for i in range(gap):
+                        for j in range(len(v)):
+                            v[j]=np.diff(v[j])
+                    df[f'first_{col}_gap{gap}']=[vi[0] if len(vi) else np.nan for vi in v]
+                    df[f'last_{col}_gap{gap}']=[vi[-1] if len(vi) else np.nan for vi in v]
+                    df[f'mean_{col}_gap{gap}']=[np.nanmean(vi) if len(vi) else np.nan for vi in v]
+                    df[f'median_{col}_gap{gap}']=[np.nanmedian(vi) if len(vi) else np.nan for vi in v]
+                    df[f'max_{col}_gap{gap}']=[np.nanmax(vi) if len(vi) else np.nan for vi in v]
+                    df[f'min_{col}_gap{gap}']=[np.nanmin(vi) if len(vi) else np.nan for vi in v]
+                    df[f'std_{col}_gap{gap}']=[np.nanstd(vi) if len(vi) else np.nan for vi in v]
+                    df[f'sum_{col}_gap{gap}']=[np.nansum(vi) if len(vi) else np.nan for vi in v]
+                    
+        if len(self.word2vec_models):#如果要对某列使用word2vec
+            self.word2vec_cols=[]
+            for (model,col,model_name) in self.word2vec_models:
+                self.word2vec_cols.append(col)#存储作为word2vec特征的col,base_FE不能drop
+            #去重
+            self.word2vec_cols=list(set(self.word2vec_cols))
+           
         if (mode=='train') and (self.use_high_correlation_feature==False):#如果需要删除高相关性的特征
             self.drop_high_correlation_feats(df)
         
         #去除无用的列
         print("drop useless cols")
-        df.drop(self.nan_cols+self.unique_cols+self.object_cols+drop_cols,axis=1,inplace=True,errors='ignore')
+        total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols
+        total_drop_cols=[col for col in total_drop_cols if col not in self.word2vec_cols+self.labelencoder_cols]
+        df.drop(total_drop_cols,axis=1,inplace=True,errors='ignore')
         df=self.reduce_mem_usage(df, float16_as32=True)
         print("-"*30)
         return df
+    
+    #这里主要是为了让交叉验证准一点,比如word2vec如果fit整个训练数据到test上遇到新数据CV可能不准.
+    def CV_FE(self,df,mode='train',fold=0):
+        #labelencoder
+        if len(self.labelencoder_colnames):
+            print("label encoder")
+            for col in self.labelencoder_colnames:
+                if mode=='train':#训练的时候
+                    
+                    #对df[col]做fit
+                    value=df[col].values
+                    le={}
+                    for v in value:
+                        if v in le.keys():
+                            le[v]=len(le)
+                    
+                    self.pickle_dump(le,f'le_{col}_fold{fold}.model')
+                else:
+                    le=self.pickle_load(self.load_path+f'le_{col}_fold{fold}.model')   
+                df[col+"_le"] = df[col].apply(lambda x:le.get(x,-1))
+
+        if len(self.word2vec_models):#如果要对某列使用word2vec
+            print("word2vec")
+            for (model,col,model_name) in self.word2vec_models:
+                col=self.col2name[col]
+                if mode=='train':
+                    model.fit(df[col])
+                    self.pickle_dump(model,f'{model_name}_{col}_fold{fold}.model')
+                else:
+                    model=self.pickle_load(self.load_path+f'{model_name}_{col}_fold{fold}.model')
+                word2vec_feats=model.transform(df[col]).toarray()
+                for i in range(word2vec_feats.shape[1]):
+                    df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
+        df.drop(self.word2vec_colnames+self.labelencoder_colnames,axis=1,inplace=True)
+        #做完这步之后就要model.fit(X,y)了,所以astype
+        for col in df.columns:
+            if (df[col].dtype==object):
+                df[col]=df[col].astype(np.float32)
+        return df
+        
     
     def Metric(self,y_true,y_pred):#对于分类任务是标签和预测的每个类别的概率
         #如果你有自定义的评估指标,那就用你的评估指标
@@ -352,11 +447,15 @@ class Yunbase():
             X_train, X_valid = X.iloc[train_index].reset_index(drop=True), X.iloc[valid_index].reset_index(drop=True)
             y_train, y_valid = y.iloc[train_index].reset_index(drop=True), y.iloc[valid_index].reset_index(drop=True)
 
+            X_train=self.CV_FE(X_train,mode='train',fold=fold)
+            X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
+            
             #如果决定使用伪标签,并且已经得到测试数据的预测结果
             #初始化的self.test=None,只有predict函数里self.test才会有数据,这时已经fit过了
             if (self.use_pseudo_label) and (type(self.test)==pd.DataFrame):
-                test_X=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
-                test_y=self.test[self.target_col]
+                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
+                test_X=test_copy.drop([self.group_col,self.target_col],axis=1,errors='ignore')
+                test_y=test_copy[self.target_col]
                 X_train=pd.concat((X_train,test_X),axis=0)
                 y_train=pd.concat((y_train,test_y),axis=0)
             
@@ -437,11 +536,11 @@ class Yunbase():
         for i in range(len(list(X.columns))):
             self.col2name[list(X.columns)[i]]=f'col_{i}'
         X=X.rename(columns=self.col2name)
-        print(f"feature_count:{len(list(X.columns))}")
         
-        for col in X.columns:
-            if X[col].dtype==object:
-                X[col]=X[col].astype(np.float32)
+        self.word2vec_colnames=[self.col2name[col] for col in self.word2vec_cols]
+        self.labelencoder_colnames=[self.col2name[col] for col in self.labelencoder_cols]
+        
+        print(f"feature_count:{len(list(X.columns))}")
                 
         #分类任务搞个target2idx,idx2target
         if self.objective!='regression':
@@ -573,7 +672,9 @@ class Yunbase():
             if self.save_oof_preds:#如果需要保存oof_preds
                 np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
         
-    def predict(self,test_path_or_file='test.csv',weights=None):
+    def predict(self,test_path_or_file='test.csv',weights=None,load_path=''):
+        #如果模型的训练和推理分开的话,模型的加载路径可能会不一样.
+        self.load_path=load_path
         #weights:[1]*len(self.models),几个模型的交叉验证就几个权重,下面会扩展到num_folds倍,后续也会对权重进行归一化处理.
         n=len(self.models)
         #如果你不设置权重,就按照普通的求平均来操作
@@ -594,14 +695,14 @@ class Yunbase():
         oof_preds=oof_preds/n
         print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
         
-        try:#path试试
+        try:#解析csv文件
             self.test=pl.read_csv(test_path_or_file)
             self.test=self.test.to_pandas()
         except:#
-            try:#path试试
+            try:#解析parquet文件
                 self.test=pl.read_parquet(test_path_or_file)
                 self.test=self.test.to_pandas()
-            except:#
+            except:
                 self.test=test_path_or_file
         #如果是polars文件,转成pandas
         if isinstance(self.test, pl.DataFrame):
@@ -613,17 +714,15 @@ class Yunbase():
         self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         self.test=self.test.rename(columns=self.col2name)
-        for col in self.test.columns:
-            if self.test[col].dtype==object:
-                self.test[col]=self.test[col].astype(np.float32)
         if self.objective=='regression':
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             cnt=0
             for (model_name,fold) in self.model_paths:
-                model=self.pickle_load(f'{model_name}_fold{fold}.model')
+                model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
                 test_pred=np.zeros(len(self.test))
                 for i in range(0,len(self.test),self.infer_size):
-                    test_pred[i:i+self.infer_size]=model.predict(self.test[i:i+self.infer_size])
+                    test_pred[i:i+self.infer_size]=model.predict(test_copy[i:i+self.infer_size])
                 test_preds[cnt]=test_pred
                 cnt+=1
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
@@ -637,10 +736,11 @@ class Yunbase():
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
                 cnt=0
                 for (model_name,fold) in self.model_paths:
-                    model=self.pickle_load(f'{model_name}_fold{fold}.model')
+                    model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
                     test_pred=np.zeros(len(self.test))
                     for i in range(0,len(self.test),self.infer_size):
-                        test_pred[i:i+self.infer_size]=model.predict(self.test.drop([self.target_col],axis=1)[i:i+self.infer_size])
+                        test_pred[i:i+self.infer_size]=model.predict(test_copy.drop([self.target_col],axis=1)[i:i+self.infer_size])
                     test_preds[cnt]=test_pred
                     cnt+=1
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
@@ -652,10 +752,11 @@ class Yunbase():
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
             cnt=0
             for (model_name,fold) in self.model_paths:
-                model=self.pickle_load(f'{model_name}_fold{fold}.model')
+                model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
                 test_pred=np.zeros((len(self.test),self.num_classes))
                 for i in range(0,len(self.test),self.infer_size):
-                    test_pred[i:i+self.infer_size]=model.predict_proba(self.test[i:i+self.infer_size])
+                    test_pred[i:i+self.infer_size]=model.predict_proba(test_copy[i:i+self.infer_size])
                 test_preds[cnt]=test_pred
                 cnt+=1   
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
@@ -669,10 +770,11 @@ class Yunbase():
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
                 fold=0
                 for (model_name,fold) in self.model_paths:
-                    model=self.pickle_load(f'{model_name}_fold{fold}.model')
+                    model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
                     test_pred=np.zeros((len(self.test),self.num_classes))
                     for i in range(0,len(self.test),self.infer_size):
-                        test_pred[i:i+self.infer_size]=model.predict_proba(self.test.drop([self.target_col],axis=1)[i:i+self.infer_size])
+                        test_pred[i:i+self.infer_size]=model.predict_proba(test_copy.drop([self.target_col],axis=1)[i:i+self.infer_size])
                     test_preds[fold]=test_pred
                     fold+=1
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
