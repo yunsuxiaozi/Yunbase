@@ -465,8 +465,8 @@ class Yunbase():
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
                     )
                 if use_optuna==False:#不是在找参数的时候输出特征重要性
-                    #列和特征重要性
-                    columns,importances=[self.name2col[x] for x in list(X_train.columns)],model.feature_importances_
+                    #列和特征重要性,这里不考虑衍生的tfidf,wordcnt特征,只考虑原始X里的特征.
+                    columns,importances=[self.name2col[x] for x in list(X.columns)],model.feature_importances_[:len(X)]
                     useless_cols=[]
                     col2importance={}
                     for i in range(len(columns)):
