@@ -342,6 +342,8 @@ class Yunbase():
         for col in df.columns:
             if (df[col].dtype==object):
                 df[col]=df[col].astype(np.float32)
+        #将inf转成nan.
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
         return df  
     
     def Metric(self,y_true,y_pred):#对于分类任务是标签和预测的每个类别的概率
@@ -462,13 +464,20 @@ class Yunbase():
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
                     )
-                #列和特征重要性
-                columns,importances=list(X_train.columns),model.feature_importances_
-                useless_cols=[]
-                for i in range(len(columns)):
-                    if importances[i]==0:
-                        useless_cols.append(columns[i])
-                print(f"useless_cols={useless_cols}")
+                if use_optuna==False:#不是在找参数的时候输出特征重要性
+                    #列和特征重要性
+                    columns,importances=[self.name2col[x] for x in list(X_train.columns)],model.feature_importances_
+                    useless_cols=[]
+                    col2importance={}
+                    for i in range(len(columns)):
+                        if importances[i]==0:
+                            useless_cols.append(columns[i])
+                        else:
+                            col2importance[columns[i]]=importances[i]
+                    #降序排列
+                    col2importance = dict(sorted(col2importance.items(), key=lambda x: x, reverse=True))
+                    print(f"feature_importance:{col2importance}")
+                    print(f"useless_cols={useless_cols}")
             elif 'cat' in model_name:
                 model.fit(X_train, y_train,
                       eval_set=(X_valid, y_valid),
@@ -538,9 +547,12 @@ class Yunbase():
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
         
+        #这里是考虑列名存在特殊字符,可能会导致GBDT模型报错.
         self.col2name={}
+        self.name2col={}
         for i in range(len(list(X.columns))):
             self.col2name[list(X.columns)[i]]=f'col_{i}'
+            self.name2col[f'col_{i}']=list(X.columns)[i]
         X=X.rename(columns=self.col2name)
         
         self.word2vec_colnames=[self.col2name[col] for col in self.word2vec_cols]
