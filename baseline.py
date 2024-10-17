@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/16
+@update_time:2024/10/17
 """
 import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
 import pandas as pd#读取csv文件的库
@@ -311,29 +311,29 @@ class Yunbase():
         if len(self.labelencoder_colnames):
             print("label encoder")
             for col in self.labelencoder_colnames:
-                if mode=='train':#训练的时候
-                    
+                #如果有模型就加载,没有模型就训练.
+                try:
+                    le=self.pickle_load(self.load_path+f'le_{col}_fold{fold}.model')
+                except:
                     #对df[col]做fit
                     value=df[col].values
                     le={}
                     for v in value:
                         if v in le.keys():
                             le[v]=len(le)
-                    
                     self.pickle_dump(le,f'le_{col}_fold{fold}.model')
-                else:
-                    le=self.pickle_load(self.load_path+f'le_{col}_fold{fold}.model')   
                 df[col+"_le"] = df[col].apply(lambda x:le.get(x,-1))
 
         if len(self.word2vec_models):#如果要对某列使用word2vec
             print("word2vec")
             for (model,col,model_name) in self.word2vec_models:
                 col=self.col2name[col]
-                if mode=='train':
-                    model.fit(df[col])
-                    self.pickle_dump(model,f'{model_name}_{col}_fold{fold}.model')
-                else:
+                #有模型就加载,没有模型就训练.
+                try:
                     model=self.pickle_load(self.load_path+f'{model_name}_{col}_fold{fold}.model')
+                except:
+                    model.fit(df[col])
+                    self.pickle_dump(model,f'{model_name}_{col}_fold{fold}.model') 
                 word2vec_feats=model.transform(df[col]).toarray()
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
@@ -342,8 +342,7 @@ class Yunbase():
         for col in df.columns:
             if (df[col].dtype==object):
                 df[col]=df[col].astype(np.float32)
-        return df
-        
+        return df  
     
     def Metric(self,y_true,y_pred):#对于分类任务是标签和预测的每个类别的概率
         #如果你有自定义的评估指标,那就用你的评估指标
@@ -462,7 +461,14 @@ class Yunbase():
             if 'lgb' in model_name:
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
-                    ) 
+                    )
+                #列和特征重要性
+                columns,importances=list(X_train.columns),model.feature_importances_
+                useless_cols=[]
+                for i in range(len(columns)):
+                    if importances[i]==0:
+                        useless_cols.append(columns[i])
+                print(f"useless_cols={useless_cols}")
             elif 'cat' in model_name:
                 model.fit(X_train, y_train,
                       eval_set=(X_valid, y_valid),
