@@ -153,7 +153,7 @@ class Yunbase():
         self.early_stop=early_stop
         self.test=None#test data will be replaced when call predict function.
         self.use_pseudo_label=use_pseudo_label
-        self.use_high_correlation_feature=use_high_correlation_feature
+        self.use_high_corr_feat=use_high_corr_feat
         self.labelencoder_cols=labelencoder_cols
         self.load_path=""#If train and inference in different notebook,we should change the path model load.
         self.list_cols=list(set(list_cols))
