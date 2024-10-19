@@ -76,7 +76,6 @@ yunbase=Yunbase(  num_folds=5,
 - list_gaps:extract features for list_cols.example=[1,2,4].
 - word2vec_models:Use models such as tfidf to extract features of string columns 
                                  example:word2vec_models=[(TfidfVectorizer(),col,model_name)]
-- :是否使用高相关性的特征。如果设置为False,会去找训练数据中高相关性的特征对,并删除其中一个。
 
 4.Model training
 
