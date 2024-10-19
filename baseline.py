@@ -1,24 +1,25 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/17
+@update_time:2024/10/19
 """
-import polars as pl#和pandas类似,但是处理大型数据集有更好的性能.
-import pandas as pd#读取csv文件的库
-import numpy as np#对矩阵进行科学计算的库
-#这里使用groupkfold
+import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
+import pandas as pd#read csv,parquet
+import numpy as np#for scientific computation of matrices
+#current supported kfold
 from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,GroupKFold
-import ast#解析python的列表字符串'[a,b,c]'->[a,b,c]
-#二分类常用的评估指标
+import ast#parse Python list strings  transform '[a,b,c]' to [a,b,c]
+#metrics
 from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
-#model lightgbm回归模型,日志评估
+#models(lgb,xgb,cat)
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor,CatBoostClassifier
 from xgboost import XGBRegressor,XGBClassifier
-import dill#对对象进行序列化和反序列化(例如保存和加载树模型)
-import optuna#自动超参数优化框架
-import warnings#避免一些可以忽略的报错
-warnings.filterwarnings('ignore')#filterwarnings()方法是用于设置警告过滤器的方法，它可以控制警告信息的输出方式和级别。
+import dill#serialize and deserialize objects (such as saving and loading tree models)
+import optuna#automatic hyperparameter optimization framework
+import warnings#avoid some negligible errors
+#The filterwarnings () method is used to set warning filters, which can control the output method and level of warning information.
+warnings.filterwarnings('ignore')
 class Yunbase():
     def __init__(self,num_folds=5,
                       models=[],
@@ -41,52 +42,60 @@ class Yunbase():
                       optuna_direction=None,
                       early_stop=100,
                       use_pseudo_label=False,
-                      use_high_correlation_feature=True,
+                      use_high_corr_feat=True,
                       labelencoder_cols=[],
                       list_cols=[],
                       list_gaps=[1],
                       word2vec_models=[],
                 ):
         """
-        num_folds:是k折交叉验证的折数
-        models:我这里已经设置了基本的模型作为baseline,你也可以使用你自己想使用的模型
-        FE:除了我这里已经做了的基本的特征工程以外,你可以自定义你需要的特征工程的函数.
-        drop_cols:所有的特征工程(你的自定义特征工程+内置的特征工程)完成之后想要删除的列.
-        seed:随机种子
-        objective:你想做的任务是什么?,regression,binary还是multi_class
-        metric:你想使用的评估指标.
-        nan_margin:一列缺失值大于多少选择不要
-        group_col:groupkfold需要有一列作为group
-        num_classes:如果是分类任务,需要指定类别数量
-        target_col:需要预测的那一列
-        infer_size:测试数据可能内存太大,一次推理会出错,所以有了分批次预测.
-        save_oof_preds:是否保存交叉验证的结果用于后续的研究.
-        save_test_preds:是否保存测试数据的预测结果
-        device:将树模型放在GPU还是CPU上训练.
-        one_hot_max:一列特征的nunique少于多少做onehot处理.
-        custom_metric:自定义评估指标,对于分类任务,输入的是y_true和预测出每个类别的概率分布.
-        use_optuna_find_params:使用optuna找参数的迭代次数,如果为0则说明不找,目前只支持lightgbm模型.
-        optuna_direction:'minimize'或者'maximize',评估指标是最大还是最小
-        early_stop:早停的次数,如果模型迭代多少次没有改善就会停下来.
-        use_pseudo_label:是否用伪标签,就是在得到测试数据的预测结果后将测试数据加入训练数据再训练一次.
-        use_high_correlation_feature:bool类型的变量,你是否要保留训练数据中高相关性的特征,如果要保留,为True,反之为False.
-        labelencoder_cols:一般是字符串类型的类别型变量,转换成[1,2,3]
-        list_cols:一般情况下为空列表,如果表格数据某列的特征是列表[1,2,3]或者"[1,2,3]",可以使用这个参数来提取特征.
-        list_gaps:初始化考虑1阶的diff特征,空列表,也可以是[1,2,4]之类的.
-        word2vec_models:使用例如tfidf之类的模型,例如:[(TfidfVectorizer(),col,model_name)]
+        num_folds             :the number of folds for k-fold cross validation.
+        models                :Built in 3 GBDTs as baseline, you can also use custom models,
+                               such as models=[(LGBMRegressor(**lgb_params),'lgb')]
+        FE                    :In addition to the built-in feature engineer, you can also customize feature engineer.
+        drop_cols             :The column to be deleted after all feature engineering is completed.
+        seed                  :random seed.
+        objective             :what task do you want to do?regression,binary or multi_class?
+        metric                :metric to evaluate your model.
+        nan_margin            :when the proportion of missing values in a column is greater than, we delete this column.
+        group_col             :if you want to use groupkfold,then define this group_col.
+        num_classes           :if objectibe is multi_class,you should define this class.
+        target_col            :the column that you want to predict.s
+        infer_size            :the test data might be large,we can predict in batches.
+        save_oof_preds        :you can save OOF for offline study.
+        save_test_preds       :you can save test_preds.For multi classification tasks, 
+                               the predicted result is the category.If you need to save the probability of the test_data,
+                               you can save test_preds.
+        device                :GBDT can training on GPU,you can set this parameter like NN.
+        one_hot_max           :If the nunique of a column is less than a certain value, perform one hot encoder.
+        custom_metric         :your custom_metric,when objective is multi_class,y_pred in custom(y_true,y_pred) is probability.            
+        use_optuna_find_params:count of use optuna find best params,0 is not use optuna to find params.
+                               Currently only LGBM is supported.
+        optuna_direction      :'minimize' or 'maximize',when you use custom metric,you need to define 
+                               the direction of optimization.
+        early_stop            :Common parameters of GBDT.
+        use_pseudo_label      :Whether to use pseudo labels.When it is true,adding the test data 
+                               to the training data and training again after obtaining the predicted 
+                               results of the test data.
+        use_high_corr_feat    :whether to use high correlation features or not. 
+        labelencoder_cols     :Convert categorical string variables into [1,2,……,n].
+        list_cols             :If the data in a column is a list or str(list), this can be used to extract features.
+        list_gaps             :extract features for list_cols.example=[1,2,4]
+        word2vec_models       :Use models such as tfidf to extract features of string columns 
+                               example:word2vec_models=[(TfidfVectorizer(),col,model_name)]
         """
         
-        #目前支持的评估指标有
-        self.supported_metrics=['custom_metric',
-                                'mae','rmse','mse','medae','rmsle',#回归任务
-                                'auc','f1_score','mcc',#二分类任务
-                                'accuracy','logloss',#多分类任务(分类任务)
+        #currented supported metric
+        self.supported_metrics=['custom_metric',#your custom_metric
+                                'mae','rmse','mse','medae','rmsle',#regression
+                                'auc','f1_score','mcc',#binary metric
+                                'accuracy','logloss',#multi_class or classification
                                ]
-        #目前支持的模型有
+        #current supported metric
         self.supported_models=['lgb','cat','xgb']
-        #目前支持的交叉验证方法有
+        #current supported kfold.
         self.supported_kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold']
-        #目前支持的任务
+        #current supported objective.
         self.supported_objectives=['binary','multi_class','regression']
         
         print(f"Currently supported metrics:{self.supported_metrics}")
@@ -95,15 +104,15 @@ class Yunbase():
         print(f"Currently supported objectives:{self.supported_objectives}")
         
         self.num_folds=num_folds
-        if self.num_folds<2:
-            raise ValueError("num_folds must be greater than 2")
+        if self.num_folds<2:#kfold must greater than 1
+            raise ValueError("num_folds must be greater than 1")
         self.seed=seed
         self.models=models
         self.FE=FE
         self.drop_cols=drop_cols
         
         self.objective=objective.lower()
-        #二分类,多分类,回归
+        #binary multi_class,regression
         if self.objective not in self.supported_objectives:
             raise ValueError("Wrong or currently unsupported objective")
         
@@ -121,6 +130,8 @@ class Yunbase():
         self.group_col=group_col
         self.target_col=target_col
         self.infer_size=infer_size
+        if self.infer_size<=0 or type(self.infer_size) is not int:
+            raise ValueError("infer size must be greater than 0 and must be int")  
         self.save_oof_preds=save_oof_preds
         if self.save_oof_preds not in [True,False]:
             raise ValueError("save_oof_preds must be True or False")  
@@ -131,41 +142,40 @@ class Yunbase():
         self.device=device.lower()
         if (self.objective=='binary') and self.num_classes!=2:
             raise ValueError("num_classes must be 2")
-        elif self.objective=='multi_class' and self.num_classes==None:
-            raise ValueError("num_classes must be a number")
+        elif (self.objective=='multi_class') and (self.num_classes==None):
+            raise ValueError("num_classes must be a number(int)")
         self.one_hot_max=one_hot_max
         self.use_optuna_find_params=use_optuna_find_params
         self.optuna_direction=optuna_direction
-        #如果你要用optuna找参数并且自定义评估指标,却不说评估指标要最大还是最小,就要报错.
         if (self.use_optuna_find_params) and (self.custom_metric!=None) and self.optuna_direction not in ['minimize','maximize']:
             raise ValueError("optuna_direction must be 'minimize' or 'maximize'")
-        self.model_paths=[]#保存模型的路径
+        self.model_paths=[]#training model path
         self.early_stop=early_stop
-        self.test=None#初始化时没有测试数据.
+        self.test=None#test data will be replaced when call predict function.
         self.use_pseudo_label=use_pseudo_label
         self.use_high_correlation_feature=use_high_correlation_feature
         self.labelencoder_cols=labelencoder_cols
-        self.load_path=""#模型训练和推理分开的时候加载模型的文件夹路径,predict传入的参数
+        self.load_path=""#If train and inference in different notebook,we should change the path model load.
         self.list_cols=list(set(list_cols))
-        self.list_gaps=sorted(list_gaps)#从小到大排序
+        self.list_gaps=sorted(list_gaps)
         self.word2vec_models=word2vec_models
-        self.word2vec_cols=[]#存储需要做word2vec特征的列名,在CV_FE里使用
-        self.col2name=None#由于数据中有些列名可能不能传入lgb模型,故需要做转换
+        self.word2vec_cols=[]#origin cols that need to use in tfidf model.
+        self.col2name=None#Due to the presence of special characters in some column names, 
+        #they cannot be directly passed into the LGB model training, so conversion is required
 
-    #保存训练好的树模型,obj是保存的模型,path是需要保存的路径
+    #save models after training
     def pickle_dump(self,obj, path):
-        #打开指定的路径path,binary write(二进制写入)
+        #open path,binary write
         with open(path, mode="wb") as f:
-            #将obj对象保存到f,使用协议版本4进行序列化
             dill.dump(obj, f, protocol=4)
+    #load models when inference
     def pickle_load(self,path):
-        #打开指定的路径path,binary read(二进制读取)
+        #open path,binary read
         with open(path, mode="rb") as f:
-            #按照制定路径去加载模型
             data = dill.load(f)
             return data
         
-    #遍历表格df的所有列修改数据类型减少内存使用
+    #Traverse all columns of df, modify data types to reduce memory usage
     def reduce_mem_usage(self,df, float16_as32=True):
         #memory_usage()是df每列的内存使用量,sum是对它们求和, B->KB->MB
         start_mem = df.memory_usage().sum() / 1024**2
@@ -201,25 +211,24 @@ class Yunbase():
                     #如果数值在float64的取值范围内，对它进行类型转换
                     else:
                         df[col] = df[col].astype(np.float64)
-        #计算一下结束后的内存
+        #calculate memory after optimization
         end_mem = df.memory_usage().sum() / 1024**2
         print('Memory usage after optimization is: {:.2f} MB'.format(end_mem))
-        #相比一开始的内存减少了百分之多少
         print('Decreased by {:.1f}%'.format(100 * (start_mem - end_mem) / start_mem))
 
         return df
         
-    #对训练数据或者测试数据做特征工程,mode='train'或者'test' ,drop_cols是其他想删除的列名
+    #basic Feature Engineer,mode='train' or 'test' ,drop_cols is other cols you want to delete.
     def base_FE(self,df,mode='train',drop_cols=[]):
         if self.FE!=None:
-            #你想添加的特征工程
+            #use your custom metric first
             df=self.FE(df)
         if mode=='train':
-            #缺失值太多
+            #missing value 
             self.nan_cols=[col for col in df.columns if df[col].isna().mean()>self.nan_margin]
             #nunique=1
             self.unique_cols=[col for col in df.drop(self.list_cols,axis=1,errors='ignore').columns if(df[col].nunique()==1)]
-            #如果一列是object列,那肯定不能放入模型进行学习
+            #object dtype
             self.object_cols=[col for col in df.columns if (df[col].dtype==object) and (col!=self.group_col)]
             #one_hot_cols
             self.one_hot_cols=[]
@@ -242,16 +251,16 @@ class Yunbase():
         if len(self.list_cols):
             print("list feature")
             for col in self.list_cols:
-                try:#如果是列表字符串'[a,b]'解析成[a,b]
+                try:#if str(list)transform '[a,b]' to [a,b]
                     df[col]=df[col].apply(lambda x:ast.literal_eval(x))
-                except:#原始数据是列表,或者不能被解析
-                    #找到第一个不是nan的值,是列表就说明没错,否则报错
+                except:#origin data is list or data can't be parsed.
+                    #find first data is not nan,if data.dtype!=list, then error
                     for i in range(len(df)):
                         v=df[col].values[i]
-                        if v==v:#找到第一个不是NAN的值
+                        if v==v:#find first data isn't nan
                             if not isinstance(v, list):
                                 raise ValueError(f"col '{col}' not a list")
-                #列表的原始特征构造
+                #origin feats 
                 df[f'{col}_len']=df[col].apply(len)
                 df[f'first_{col}']=df[col].apply(lambda x:x[0])
                 df[f'last_{col}']=df[col].apply(lambda x:x[-1])
@@ -263,7 +272,7 @@ class Yunbase():
                 df[f'sum_{col}']=df[col].apply(lambda x:np.nansum(x))
                 df[f'ptp_{col}']=df[f'max_{col}']-df[f'min_{col}']
                 df[f'mean_{col}/std_{col}']=df[f'mean_{col}']/df[f'std_{col}']
-                #列表的gap特征构造
+                #list gap_feats
                 def get_list(l):
                     if len(self.list_gaps)==0:
                         return l
@@ -286,17 +295,16 @@ class Yunbase():
                     df[f'std_{col}_gap{gap}']=[np.nanstd(vi) if len(vi) else np.nan for vi in v]
                     df[f'sum_{col}_gap{gap}']=[np.nansum(vi) if len(vi) else np.nan for vi in v]
                     
-        if len(self.word2vec_models):#如果要对某列使用word2vec
+        if len(self.word2vec_models):#word2vec transform
             self.word2vec_cols=[]
             for (model,col,model_name) in self.word2vec_models:
-                self.word2vec_cols.append(col)#存储作为word2vec特征的col,base_FE不能drop
-            #去重
+                self.word2vec_cols.append(col)
+            #set to duplicate removal
             self.word2vec_cols=list(set(self.word2vec_cols))
            
-        if (mode=='train') and (self.use_high_correlation_feature==False):#如果需要删除高相关性的特征
+        if (mode=='train') and (self.use_high_corr_feat==False):#drop high correlation features
             self.drop_high_correlation_feats(df)
         
-        #去除无用的列
         print("drop useless cols")
         total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols
         total_drop_cols=[col for col in total_drop_cols if col not in self.word2vec_cols+self.labelencoder_cols]
@@ -305,17 +313,16 @@ class Yunbase():
         print("-"*30)
         return df
     
-    #这里主要是为了让交叉验证准一点,比如word2vec如果fit整个训练数据到test上遇到新数据CV可能不准.
+    #Feature engineering that needs to be done internally in cross validation.
     def CV_FE(self,df,mode='train',fold=0):
         #labelencoder
         if len(self.labelencoder_colnames):
             print("label encoder")
             for col in self.labelencoder_colnames:
-                #如果有模型就加载,没有模型就训练.
+                #load model when model is existed,fit when model isn't exist.
                 try:
                     le=self.pickle_load(self.load_path+f'le_{col}_fold{fold}.model')
                 except:
-                    #对df[col]做fit
                     value=df[col].values
                     le={}
                     for v in value:
@@ -324,11 +331,11 @@ class Yunbase():
                     self.pickle_dump(le,f'le_{col}_fold{fold}.model')
                 df[col+"_le"] = df[col].apply(lambda x:le.get(x,-1))
 
-        if len(self.word2vec_models):#如果要对某列使用word2vec
+        if len(self.word2vec_models):
             print("word2vec")
             for (model,col,model_name) in self.word2vec_models:
                 col=self.col2name[col]
-                #有模型就加载,没有模型就训练.
+                #load when model is existed.fit when model isn't existed.
                 try:
                     model=self.pickle_load(self.load_path+f'{model_name}_{col}_fold{fold}.model')
                 except:
@@ -338,16 +345,16 @@ class Yunbase():
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
         df.drop(self.word2vec_colnames+self.labelencoder_colnames,axis=1,inplace=True)
-        #做完这步之后就要model.fit(X,y)了,所以astype
+        #after this operation,df will be dropped into model,so we need to Convert object to floating-point numbers
         for col in df.columns:
             if (df[col].dtype==object):
                 df[col]=df[col].astype(np.float32)
-        #将inf转成nan.
+        #replace inf to nan
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         return df  
     
-    def Metric(self,y_true,y_pred):#对于分类任务是标签和预测的每个类别的概率
-        #如果你有自定义的评估指标,那就用你的评估指标
+    def Metric(self,y_true,y_pred):#for multi_class,labeland proability
+        #use cutom_metric when you define.
         if self.custom_metric!=None:
             return self.custom_metric(y_true,y_pred)
         if self.objective=='regression':
@@ -363,18 +370,15 @@ class Yunbase():
                    return np.sqrt(np.mean((np.log1p(y_pred)-np.log1p(y_true))**2))
         else:
             if self.metric=='accuracy':
-                #转换成概率最大的类别
-                y_pred=np.argmax(y_pred,axis=1)
+                y_pred=np.argmax(y_pred,axis=1)#transform probability to label
                 return np.mean(y_true==y_pred)
             elif self.metric=='auc':
                 return roc_auc_score(y_true,y_pred[:,1])
             elif self.metric=='f1_score':
-                #转换成概率最大的类别
-                y_pred=np.argmax(y_pred,axis=1)
+                y_pred=np.argmax(y_pred,axis=1)#transform probability to label
                 return f1_score(y_true, y_pred)
             elif self.metric=='mcc':
-                #转换成概率最大的类别
-                y_pred=np.argmax(y_pred,axis=1)
+                y_pred=np.argmax(y_pred,axis=1)#transform probability to label
                 return matthews_corrcoef(y_true, y_pred)
             elif self.metric=='logloss':
                 eps=1e-15
@@ -384,8 +388,7 @@ class Yunbase():
                 y_true=label
                 y_pred=np.clip(y_pred,eps,1-eps)
                 return -np.mean(np.sum(y_true*np.log(y_pred),axis=-1))
-        
-    #用optuna找lgb模型的参数,暂时不支持custom_metric
+    
     def optuna_lgb(self,X,y,group,kf,metric):
         def objective(trial):
             params = {
@@ -393,16 +396,16 @@ class Yunbase():
                 'random_state': self.seed,
                 'n_estimators': trial.suggest_int('n_estimators', 500,1500),
                 'reg_alpha': trial.suggest_loguniform('reg_alpha', 1e-3, 10.0),
-                'reg_lambda': trial.suggest_loguniform('reg_lambda', 1e-3, 10.0),#对数分布的建议值
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1),#浮点数
+                'reg_lambda': trial.suggest_loguniform('reg_lambda', 1e-3, 10.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1),
                 'subsample': trial.suggest_float('subsample', 0.5, 1),
                 'learning_rate': trial.suggest_float('learning_rate', 1e-4, 0.5, log=True),
-                'num_leaves' : trial.suggest_int('num_leaves', 8, 64),#整数
+                'num_leaves' : trial.suggest_int('num_leaves', 8, 64),
                 'min_child_samples': trial.suggest_int('min_child_samples', 2, 100),
                 "extra_trees":True,
                 "verbose": -1
             }
-            if self.device in ['cuda','gpu']:#gpu常见的写法
+            if self.device in ['cuda','gpu']:#gpu mode when training
                 params['device']='gpu'
                 params['gpu_use_dp']=True
             model_name='lgb'
@@ -412,7 +415,7 @@ class Yunbase():
                 model=LGBMClassifier(**params)
             oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,use_optuna=True)
             return metric_score
-        #优化最大值还是最小值
+        #'minimize' or 'maximize'
         if self.metric in ['accuracy','auc','f1_score','mcc']:
             direction='maximize'
         elif self.metric in ['medae','mae','rmse','mse','logloss','rmsle']:
@@ -420,9 +423,7 @@ class Yunbase():
         else:
             direction=self.optuna_direction
             
-        #创建的研究命名,找最大值.
-        study = optuna.create_study(direction=direction, study_name='find best lgb_params')
-        #目标函数,尝试的次数  
+        study = optuna.create_study(direction=direction, study_name='find best lgb_params') 
         study.optimize(objective, n_trials=self.use_optuna_find_params)
         best_params=study.best_trial.params
         best_params["boosting_type"]="gbdt"
@@ -433,7 +434,8 @@ class Yunbase():
         print(f"best_params={best_params}")
         return best_params
     
-    #这个function会返回 oof_preds和metric_score,用于optuna找参数的.如果在使用optuna找参数,就不用保存预训练模型.
+    # return oof_preds and metric_score
+    # can use optuna to find params.If use optuna,then not save models.
     def cross_validation(self,X,y,group,kf,model,model_name,use_optuna=False):
         log=100
         if use_optuna:
@@ -451,8 +453,6 @@ class Yunbase():
             X_train=self.CV_FE(X_train,mode='train',fold=fold)
             X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
             
-            #如果决定使用伪标签,并且已经得到测试数据的预测结果
-            #初始化的self.test=None,只有predict函数里self.test才会有数据,这时已经fit过了
             if (self.use_pseudo_label) and (type(self.test)==pd.DataFrame):
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
                 test_X=test_copy.drop([self.group_col,self.target_col],axis=1,errors='ignore')
@@ -464,8 +464,8 @@ class Yunbase():
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
                     )
-                if use_optuna==False:#不是在找参数的时候输出特征重要性
-                    #列和特征重要性,这里不考虑衍生的tfidf,wordcnt特征,只考虑原始X里的特征.
+                if use_optuna==False:#print feature importance when not use optuna to find params.
+                    #here we only care origin features in X.
                     columns,importances=[self.name2col[x] for x in list(X.columns)],model.feature_importances_[:len(X)]
                     useless_cols=[]
                     col2importance={}
@@ -474,7 +474,7 @@ class Yunbase():
                             useless_cols.append(columns[i])
                         else:
                             col2importance[columns[i]]=importances[i]
-                    #降序排列
+                    #descending order
                     col2importance = dict(sorted(col2importance.items(), key=lambda x: x, reverse=True))
                     print(f"feature_importance:{col2importance}")
                     print(f"useless_cols={useless_cols}")
@@ -484,23 +484,23 @@ class Yunbase():
                       early_stopping_rounds=self.early_stop, verbose=log)
             elif 'xgb' in model_name:
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=log)
-            else:#假设你还有其他的模型
+            else:#other models
                 model.fit(X_train,y_train) 
 
             if self.objective=='regression':
                 oof_preds[valid_index]=model.predict(X_valid)
             else:
                 oof_preds[valid_index]=model.predict_proba(X_valid)
-            if not use_optuna:#如果没有在找参数
+            if not use_optuna:#not find_params(training)
                 self.pickle_dump(model,f'{model_name}_fold{fold}.model')
                 self.model_paths.append((model_name,fold))
         metric_score=self.Metric(y.values,oof_preds)
         return oof_preds,metric_score
     
     def drop_high_correlation_feats(self,df):
-        #target_col和group_col都是模型训练要用的,不能删,object特征计算不了相关性
-        #这里相关性定死0.99,毕竟低于这个值的特征还是有信息的,可以用PCA之类的降维方法.
-        #如果你需要删除其他高相关性的特征,可以自行添加进初始化参数drop_cols中.
+        #target_col and group_col is for model training,don't delete.object feature is string.
+        #Here we choose 0.99,other feature with high correlation can use Dimensionality reduction such as PCA.
+        #if you want to delete other feature with high correlation,add into drop_cols when init.
         numerical_cols=[col for col in df.columns if (col not in [self.target_col,self.group_col]) and df[col].dtype!=object]
         corr_matrix=df[numerical_cols].corr().values
         drop_cols=[]
@@ -508,37 +508,37 @@ class Yunbase():
             for j in range(i+1,len(corr_matrix)):
                 if abs(corr_matrix[i][j])>=0.99:
                     drop_cols.append(numerical_cols[j])
-        #加入drop_cols中,后续特征工程结束一起drop
+        #add drop_cols to self.drop_cols,they will be dropped in the final part of the function base_FE.
         print(f"drop_cols={drop_cols}")
         self.drop_cols+=drop_cols
     
     def fit(self,train_path_or_file='train.csv'):
+        #read csv,parquet or csv_file
         self.train_path_or_file=train_path_or_file
-        try:#path试试
+        try:
             self.train=pl.read_csv(train_path_or_file)
             self.train=self.train.to_pandas()
-        except:#csv_file 或者parquet
+        except:
             try:
                 self.train=pl.read_parquet(train_path_or_file)
                 self.train=self.train.to_pandas()
             except:
                 self.train=train_path_or_file
-        #如果是polars文件,转成pandas
+        #polars to pandas.
         if isinstance(self.train, pl.DataFrame):
             self.train=self.train.to_pandas()
-        #提供的训练数据不是df表格
         if not isinstance(self.train, pd.DataFrame):
             raise ValueError("train_path_or_file is not pd.DataFrame")
         print(f"len(train):{len(self.train)}")
         self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
         
-        #选择哪种交叉验证方法
-        if self.objective=='binary' or self.objective=='multi_class':
+        #choose cross validation
+        if self.objective!='regression':
             if self.group_col!=None:#group
                 kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
             else:
                 kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
-        else:#回归任务
+        else:#regression
             if self.group_col!=None:#group
                 kf=GroupKFold(n_splits=self.num_folds)
             else:
@@ -547,7 +547,7 @@ class Yunbase():
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
         
-        #这里是考虑列名存在特殊字符,可能会导致GBDT模型报错.
+        #special characters in columns'name will lead to errors when GBDT model training.
         self.col2name={}
         self.name2col={}
         for i in range(len(list(X.columns))):
@@ -560,7 +560,7 @@ class Yunbase():
         
         print(f"feature_count:{len(list(X.columns))}")
                 
-        #分类任务搞个target2idx,idx2target
+        #classification:target2idx,idx2target
         if self.objective!='regression':
             self.target2idx={}
             self.idx2target={}
@@ -574,23 +574,23 @@ class Yunbase():
             group=self.train[self.group_col]
         else:
             group=None
-        #存储训练集真实的标签,因为有target2idx的操作,用于最后算final_score    
+        #save true label in train data to calculate final score  
         self.target=y.values
         
-        #模型的训练,如果你自己准备了模型,那就用你的模型,否则就用我的模型
+        #if you don't use your own models,then use built-in models.
         if len(self.models)==0:
             
             metric=self.metric
             if self.objective=='multi_class':
                 metric='multi_logloss'
-            #lightgbm不支持f1_score,但是最后调用Metric的时候会计算f1_score
+            #lightgbm don't support f1_score,but we will calculate f1_score as Metric.
             if metric in ['f1_score','mcc','logloss']:
                 metric='auc'
             elif metric=='medae':
                 metric='mae'
             elif metric=='rmsle':
                 metric='mse'
-            if self.custom_metric!=None:#用custom_metric
+            if self.custom_metric!=None:
                 if self.objective=='regression':
                     metric='rmse'
                 elif self.objective=='binary':
@@ -602,11 +602,11 @@ class Yunbase():
                         "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
                         "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
                         }
-            #找到新的参数
-            if self.use_optuna_find_params:#如果要用optuna找lgb模型的参数
+            #find new params then use optuna
+            if self.use_optuna_find_params:
                 lgb_params=self.optuna_lgb(X,y,group,kf,metric)
              
-            #catboost的metric设置
+            #catboost's metric
             # Valid options are: 'Logloss', 'CrossEntropy', 'CtrFactor', 'Focal', 'RMSE', 'LogCosh', 
             # 'Lq', 'MAE', 'Quantile', 'MultiQuantile', 'Expectile', 'LogLinQuantile', 'MAPE', 
             # 'Poisson', 'MSLE', 'MedianAbsoluteError', 'SMAPE', 'Huber', 'Tweedie', 'Cox', 
@@ -631,7 +631,7 @@ class Yunbase():
                 metric='Accuracy'
             elif self.metric=='f1_score':
                 metric='F1'
-            elif self.metric in ['auc','rmse','mcc','mae']:#catboost里是大写的评估指标
+            elif self.metric in ['auc','rmse','mcc','mae']:
                 metric=metric.upper()
             elif self.metric=='medae':
                 metric='MAE'
@@ -663,7 +663,7 @@ class Yunbase():
                         'min_child_weight': 3,'early_stopping_rounds':self.early_stop,
                        }
 
-            if self.device in ['cuda','gpu']:#gpu常见的写法
+            if self.device in ['cuda','gpu']:#gpu's name
                 lgb_params['device']='gpu'
                 lgb_params['gpu_use_dp']=True
                 cat_params['task_type']="GPU"
@@ -687,45 +687,44 @@ class Yunbase():
         for (model,model_name) in self.models:
             oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,use_optuna=False)
             print(f"{self.metric}:{metric_score}")
-            if self.save_oof_preds:#如果需要保存oof_preds
+            if self.save_oof_preds:#if oof_preds is needed
                 np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
         
     def predict(self,test_path_or_file='test.csv',weights=None,load_path=''):
-        #如果模型的训练和推理分开的话,模型的加载路径可能会不一样.
+        #if train and inference in different notebook,then
         self.load_path=load_path
-        #weights:[1]*len(self.models),几个模型的交叉验证就几个权重,下面会扩展到num_folds倍,后续也会对权重进行归一化处理.
+        #weights:[1]*len(self.models)
         n=len(self.models)
-        #如果你不设置权重,就按照普通的求平均来操作
+        #if you don't set weights,then calculate mean value as result.
         if weights==None:
             weights=np.ones(n)
 
         if len(weights)!=n:
             raise ValueError(f"length of weights must be len(models)")
         weights=np.array([w for w in weights for f in range(self.num_folds)],dtype=np.float32)
-        #归一化
+        #normalization
         weights=weights*(self.num_folds*n)/np.sum(weights)
 
-        #计算oof分数             
+        #calculate oof score       
         oof_preds=np.zeros_like(np.load(f"{self.models[0//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy"))
         for i in range(0,len(weights),self.num_folds):
             oof_pred=np.load(f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
             oof_preds+=weights[i]*oof_pred
         oof_preds=oof_preds/n
         print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
-        
-        try:#解析csv文件
+        #parse csv,parquet
+        try:
             self.test=pl.read_csv(test_path_or_file)
             self.test=self.test.to_pandas()
-        except:#
-            try:#解析parquet文件
+        except:
+            try:
                 self.test=pl.read_parquet(test_path_or_file)
                 self.test=self.test.to_pandas()
             except:
                 self.test=test_path_or_file
-        #如果是polars文件,转成pandas
+        #polars to pandas
         if isinstance(self.test, pl.DataFrame):
             self.test=self.test.to_pandas()
-        #提供的训练数据不是df表格
         if not isinstance(self.test, pd.DataFrame):
             raise ValueError("test_path_or_file is not pd.DataFrame")
         print(f"len(test):{len(self.test)}")
@@ -745,7 +744,7 @@ class Yunbase():
                 cnt+=1
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             
-            #伪标签代码
+            #use pseudo label
             if self.use_pseudo_label:
                 self.test[self.target_col]=test_preds
                 self.model_paths=[]
@@ -766,7 +765,7 @@ class Yunbase():
             if self.save_test_preds:
                 np.save('test_preds.npy',test_preds)
             return test_preds
-        else:#分类任务到底要的是什么
+        else:#classification 
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
             cnt=0
             for (model_name,fold) in self.model_paths:
@@ -779,7 +778,7 @@ class Yunbase():
                 cnt+=1   
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
             
-            #伪标签代码
+            #use pseudo label
             if self.use_pseudo_label:
                 self.test[self.target_col]=np.argmax(test_preds,axis=1)
                 self.model_paths=[]
@@ -803,49 +802,47 @@ class Yunbase():
             test_preds=np.argmax(test_preds,axis=1)
             return test_preds
 
-    #集成很多solution
+    #ensemble some solutions.
     def ensemble(self,solution_paths_or_files,weights=None):
-        #如果你不设置权重,就按照普通的求平均来操作
+        #If you don't set weights,then use mean value as result.
         n=len(solution_paths_or_files)
         if weights==None:
             weights=np.ones(n)
         if len(weights)!=n:
             raise ValueError(f"length of weights must be len(solution_paths_or_files)")
-        #归一化
+        #normalization
         weights=weights/np.sum(weights)
 
-        #连续值加权求和
+        #Weighted Sum of Continuous Values
         if (self.objective=='regression') or(self.metric=='auc'):
             final_solutions=[]
             for i in range(n):
-                try:#path试试
+                try:
                     solution=pl.read_csv(solution_paths_or_files[i])
                     solution=solution.to_pandas()
                 except:#csv_file
                     solution=solution_paths_or_files[i]
-                #提供的训练数据不是df表格
                 if not isinstance(solution, pd.DataFrame):
                     raise ValueError("solution_paths_or_files is not pd.DataFrame")
                 final_solutions.append(weights[i]*solution[self.target_col].values)
             final_solutions=np.sum(final_solutions,axis=0)
             return final_solutions
-        else:#离散值(分类任务)求众数
-            #n个solution,m个数据
+        else:#classification find mode
+            #n solutions,m datas
             solutions=[]
             for i in range(n):
-                try:#path试试
+                try:
                     solution=pl.read_csv(solution_paths_or_files[i])
                     solution=solution.to_pandas()
                 except:#csv_file
                     solution=solution_paths_or_files[i]
-                #提供的训练数据不是df表格
                 if not isinstance(solution, pd.DataFrame):
                     raise ValueError("solution_paths_or_files is not pd.DataFrame")
                 solutions.append(solution[self.target_col].values)
             final_solutions=[]
             for i in range(len(solutions[0])):
                 solution2count={}
-                #第i个数据第j个solution
+                #data[i] solution[j]
                 for j in range(n):
                     if solutions[j][i] in solution2count.keys():
                         solution2count[ solutions[j][i] ]+=weights[j]
@@ -855,7 +852,8 @@ class Yunbase():
                 final_solutions.append(list(solution2count.keys())[0])
             final_solutions=np.array(final_solutions)
             return final_solutions
-                
+
+    #save test_preds to submission.csv
     def submit(self,submission_path='submission.csv',test_preds=None,save_name='yunbase'):
         submission=pd.read_csv(submission_path)
         submission[self.target_col]=test_preds
@@ -863,4 +861,3 @@ class Yunbase():
             if self.metric!='auc':
                 submission[self.target_col]=submission[self.target_col].apply(lambda x:self.idx2target[x])
         submission.to_csv(f"{save_name}.csv",index=None)
-        submission.head()
