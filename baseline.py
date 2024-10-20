@@ -736,7 +736,7 @@ class Yunbase():
             self.test=self.test.to_pandas()
         if not isinstance(self.test, pd.DataFrame):
             raise ValueError("test_path_or_file is not pd.DataFrame")
-        print(f"test.shape:{test.shape}")
+        print(f"test.shape:{self.test.shape}")
         print("< Feature Engineer >")
         self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')

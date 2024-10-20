@@ -1,6 +1,6 @@
 ## Yunbase,First submission of the algorithm competition
 
-In the competition of data mining,there are many operations that need to be done in every time.Many of these operations, from data preprocessing to k-fold cross validation, are repetitive.It's a bit troublesome to write repetitive code every time, so I extracted the common parts among these operations and wrote the Yunbase class here。(Yun is my name,base is the baseline of competition)
+In the competition of data mining,there are many operations that need to be done in every time.Many of these operations, from data preprocessing to k-fold cross validation, are repetitive.It's a bit troublesome to write repetitive code every time, so I extracted the common parts among these operations and wrote the Yunbase class here.(Yun is my name,base is the baseline of competition)
 
 ### Get Started Quickly
 
@@ -117,12 +117,22 @@ The code has now completed a rough framework and will continue to be improved by
 
 In principle, fix as many bugs as I discover and add as many new features as I think of.
 
-1.add repeatkfold。
+1.add kfold such as repeatkfold.
 
 2.Undersampling, oversampling, and weighting of samples.
 
-3.model.fit(train_X,train_y),model.predict(test_X) np.array
+3.fit function to np.array.(such as model.fit(train_X,train_y),model.predict(test_X))
+
+4.add more useful metric.
+
+5.In addition to kfold, single model training and inference are also implemented.
+
+6.In addition to GBDT, other model  such as LinearRegression training and inference are also implemented.
+
+7.hill climbing to find blending weight.
+
+Waiting for updates.
 
 Kaggle:https://www.kaggle.com/yunsuxiaozi
 
- update time:2024/10/19(baseline.py and README may not synchronize updates)
+ update time:2024/10/20(baseline.py and README may not synchronize updates)
