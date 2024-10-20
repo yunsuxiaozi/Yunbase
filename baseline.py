@@ -47,6 +47,7 @@ class Yunbase():
                       list_cols=[],
                       list_gaps=[1],
                       word2vec_models=[],
+                      print_feature_importance=False,
                 ):
         """
         num_folds             :the number of folds for k-fold cross validation.
@@ -83,6 +84,7 @@ class Yunbase():
         list_gaps             :extract features for list_cols.example=[1,2,4]
         word2vec_models       :Use models such as tfidf to extract features of string columns 
                                example:word2vec_models=[(TfidfVectorizer(),col,model_name)]
+        print_feature_importance: after model training,whether print feature importance or not
         """
         
         #currented supported metric
@@ -160,6 +162,7 @@ class Yunbase():
         self.list_gaps=sorted(list_gaps)
         self.word2vec_models=word2vec_models
         self.word2vec_cols=[]#origin cols that need to use in tfidf model.
+        self.print_feature_importance=print_feature_importance
         self.col2name=None#Due to the presence of special characters in some column names, 
         #they cannot be directly passed into the LGB model training, so conversion is required
 
@@ -465,7 +468,7 @@ class Yunbase():
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
                     )
-                if use_optuna==False:#print feature importance when not use optuna to find params.
+                if (use_optuna==False) and (self.print_feature_importance):#print feature importance when not use optuna to find params.
                     #here we only care origin features in X.
                     columns,importances=[self.name2col[x] for x in list(X.columns)],model.feature_importances_[:len(X)]
                     useless_cols=[]
@@ -506,9 +509,14 @@ class Yunbase():
         corr_matrix=df[numerical_cols].corr().values
         drop_cols=[]
         for i in range(len(corr_matrix)):
-            for j in range(i+1,len(corr_matrix)):
-                if abs(corr_matrix[i][j])>=0.99:
-                    drop_cols.append(numerical_cols[j])
+            #time series data
+            #bg0 and bg1 have correlation of 0.99,……,bg{n-1} and bg{n} have correlation of 0.99,
+            #if don't add this,we will drop([bg1,……,bgn]),although bg0 and bgn have a low correlation.
+            if numerical_cols[i] not in drop_cols:
+                for j in range(i+1,len(corr_matrix)):
+                    if numerical_cols[j]  not in drop_cols:
+                        if abs(corr_matrix[i][j])>=0.99:
+                            drop_cols.append(numerical_cols[j])
         #add drop_cols to self.drop_cols,they will be dropped in the final part of the function base_FE.
         print(f"drop_cols={drop_cols}")
         self.drop_cols+=drop_cols
