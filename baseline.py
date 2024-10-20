@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/19
+@update_time:2024/10/20
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -239,7 +239,7 @@ class Yunbase():
                         self.one_hot_cols.append([col,list(df[col].unique())]) 
                     elif df[col].nunique()==2:
                         self.nunique_2_cols.append([col,list(df[col].unique())[0]])
-        print("one hot encoder")          
+        print("< one hot encoder >")          
         for i in range(len(self.one_hot_cols)):
             col,nunique=self.one_hot_cols[i]
             for u in nunique:
@@ -249,7 +249,7 @@ class Yunbase():
             df[f"{c}_{u}"]=(df[c]==u).astype(np.int8)
         
         if len(self.list_cols):
-            print("list feature")
+            print("< list column's feature >")
             for col in self.list_cols:
                 try:#if str(list)transform '[a,b]' to [a,b]
                     df[col]=df[col].apply(lambda x:ast.literal_eval(x))
@@ -303,9 +303,10 @@ class Yunbase():
             self.word2vec_cols=list(set(self.word2vec_cols))
            
         if (mode=='train') and (self.use_high_corr_feat==False):#drop high correlation features
+            print("< drop high correlation feature >")
             self.drop_high_correlation_feats(df)
         
-        print("drop useless cols")
+        print("< drop useless cols >")
         total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols
         total_drop_cols=[col for col in total_drop_cols if col not in self.word2vec_cols+self.labelencoder_cols]
         df.drop(total_drop_cols,axis=1,inplace=True,errors='ignore')
@@ -317,7 +318,7 @@ class Yunbase():
     def CV_FE(self,df,mode='train',fold=0):
         #labelencoder
         if len(self.labelencoder_colnames):
-            print("label encoder")
+            print("< label encoder >")
             for col in self.labelencoder_colnames:
                 #load model when model is existed,fit when model isn't exist.
                 try:
@@ -332,7 +333,7 @@ class Yunbase():
                 df[col+"_le"] = df[col].apply(lambda x:le.get(x,-1))
 
         if len(self.word2vec_models):
-            print("word2vec")
+            print("< word2vec >")
             for (model,col,model_name) in self.word2vec_models:
                 col=self.col2name[col]
                 #load when model is existed.fit when model isn't existed.
@@ -513,23 +514,27 @@ class Yunbase():
         self.drop_cols+=drop_cols
     
     def fit(self,train_path_or_file='train.csv'):
+        print("fit......")
+        print("< load train data >")
         #read csv,parquet or csv_file
         self.train_path_or_file=train_path_or_file
         try:
-            self.train=pl.read_csv(train_path_or_file)
+            self.train=pl.read_csv(self.train_path_or_file)
             self.train=self.train.to_pandas()
         except:
             try:
-                self.train=pl.read_parquet(train_path_or_file)
+                self.train=pl.read_parquet(self.train_path_or_file)
                 self.train=self.train.to_pandas()
-            except:
-                self.train=train_path_or_file
+            except:#file.copy()
+                self.train=self.train_path_or_file.copy()
         #polars to pandas.
         if isinstance(self.train, pl.DataFrame):
             self.train=self.train.to_pandas()
         if not isinstance(self.train, pd.DataFrame):
             raise ValueError("train_path_or_file is not pd.DataFrame")
-        print(f"len(train):{len(self.train)}")
+        self.train=self.train.drop_duplicates()
+        print(f"train.shape:{self.train.shape}")
+        print("< Feature Engineer >")
         self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
         
         #choose cross validation
@@ -578,6 +583,7 @@ class Yunbase():
         self.target=y.values
         
         #if you don't use your own models,then use built-in models.
+        print("< load models >")
         if len(self.models)==0:
             
             metric=self.metric
@@ -683,7 +689,8 @@ class Yunbase():
             print(f"lgb_params:{lgb_params}")
             print(f"xgb_params:{xgb_params}")
             print(f"cat_params:{cat_params}")
-            
+
+        print("< model training >")
         for (model,model_name) in self.models:
             oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,use_optuna=False)
             print(f"{self.metric}:{metric_score}")
@@ -691,6 +698,8 @@ class Yunbase():
                 np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
         
     def predict(self,test_path_or_file='test.csv',weights=None,load_path=''):
+        print("predict......")
+        print("< weight normalization >")
         #if train and inference in different notebook,then
         self.load_path=load_path
         #weights:[1]*len(self.models)
@@ -698,7 +707,6 @@ class Yunbase():
         #if you don't set weights,then calculate mean value as result.
         if weights==None:
             weights=np.ones(n)
-
         if len(weights)!=n:
             raise ValueError(f"length of weights must be len(models)")
         weights=np.array([w for w in weights for f in range(self.num_folds)],dtype=np.float32)
@@ -712,26 +720,29 @@ class Yunbase():
             oof_preds+=weights[i]*oof_pred
         oof_preds=oof_preds/n
         print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
+        print("< load test data >")
         #parse csv,parquet
         try:
             self.test=pl.read_csv(test_path_or_file)
             self.test=self.test.to_pandas()
         except:
-            try:
+            try:#parquet
                 self.test=pl.read_parquet(test_path_or_file)
                 self.test=self.test.to_pandas()
-            except:
-                self.test=test_path_or_file
+            except:#file.copy
+                self.test=test_path_or_file.copy()
         #polars to pandas
         if isinstance(self.test, pl.DataFrame):
             self.test=self.test.to_pandas()
         if not isinstance(self.test, pd.DataFrame):
             raise ValueError("test_path_or_file is not pd.DataFrame")
-        print(f"len(test):{len(self.test)}")
+        print(f"test.shape:{test.shape}")
+        print("< Feature Engineer >")
         self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         self.test=self.test.rename(columns=self.col2name)
         if self.objective=='regression':
+            print("< prediction on test data >")
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             cnt=0
             for (model_name,fold) in self.model_paths:
