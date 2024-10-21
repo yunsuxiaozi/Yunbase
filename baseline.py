@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/20
+@update_time:2024/10/21
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -17,6 +17,8 @@ from catboost import CatBoostRegressor,CatBoostClassifier
 from xgboost import XGBRegressor,XGBClassifier
 import dill#serialize and deserialize objects (such as saving and loading tree models)
 import optuna#automatic hyperparameter optimization framework
+from colorama import Fore, Style #print colorful text
+from scipy.stats import kurtosis#calculate kurt
 import warnings#avoid some negligible errors
 #The filterwarnings () method is used to set warning filters, which can control the output method and level of warning information.
 warnings.filterwarnings('ignore')
@@ -165,7 +167,11 @@ class Yunbase():
         self.print_feature_importance=print_feature_importance
         self.col2name=None#Due to the presence of special characters in some column names, 
         #they cannot be directly passed into the LGB model training, so conversion is required
-
+    
+    #print colorful text
+    def PrintColor(self,text,color = Fore.BLUE):
+        print(color + text + Style.RESET_ALL)
+    
     #save models after training
     def pickle_dump(self,obj, path):
         #open path,binary write
@@ -254,7 +260,7 @@ class Yunbase():
         if len(self.list_cols):
             print("< list column's feature >")
             for col in self.list_cols:
-                try:#if str(list)transform '[a,b]' to [a,b]
+                try:#if str(list),transform '[a,b]' to [a,b]
                     df[col]=df[col].apply(lambda x:ast.literal_eval(x))
                 except:#origin data is list or data can't be parsed.
                     #find first data is not nan,if data.dtype!=list, then error
@@ -263,41 +269,29 @@ class Yunbase():
                         if v==v:#find first data isn't nan
                             if not isinstance(v, list):
                                 raise ValueError(f"col '{col}' not a list")
-                #origin feats 
-                df[f'{col}_len']=df[col].apply(len)
-                df[f'first_{col}']=df[col].apply(lambda x:x[0])
-                df[f'last_{col}']=df[col].apply(lambda x:x[-1])
-                df[f'mean_{col}']=df[col].apply(lambda x:np.nanmean(x))
-                df[f'median_{col}']=df[col].apply(lambda x:np.nanmedian(x))
-                df[f'max_{col}']=df[col].apply(lambda x:np.nanmax(x))
-                df[f'min_{col}']=df[col].apply(lambda x:np.nanmin(x))
-                df[f'std_{col}']=df[col].apply(lambda x:np.nanstd(x))
-                df[f'sum_{col}']=df[col].apply(lambda x:np.nansum(x))
-                df[f'ptp_{col}']=df[f'max_{col}']-df[f'min_{col}']
-                df[f'mean_{col}/std_{col}']=df[f'mean_{col}']/df[f'std_{col}']
-                #list gap_feats
-                def get_list(l):
-                    if len(self.list_gaps)==0:
-                        return l
-                    elif len(l)<self.list_gaps[-1]:
-                        return l+[np.nan]*(self.list_gaps[-1]-len(l))
-                    else:
-                        return l
-                df[col]=df[col].apply(lambda l:get_list(l))
+                
+                #add index,data of list can groupby index.
+                df['index']=np.arange(len(df))
+                #construct origin feats 
+                list_col_df=df.copy().explode(col)[['index',col]]
+
+                group_cols=[col]
                 for gap in self.list_gaps:
-                    v=df[col].values
-                    for i in range(gap):
-                        for j in range(len(v)):
-                            v[j]=np.diff(v[j])
-                    df[f'first_{col}_gap{gap}']=[vi[0] if len(vi) else np.nan for vi in v]
-                    df[f'last_{col}_gap{gap}']=[vi[-1] if len(vi) else np.nan for vi in v]
-                    df[f'mean_{col}_gap{gap}']=[np.nanmean(vi) if len(vi) else np.nan for vi in v]
-                    df[f'median_{col}_gap{gap}']=[np.nanmedian(vi) if len(vi) else np.nan for vi in v]
-                    df[f'max_{col}_gap{gap}']=[np.nanmax(vi) if len(vi) else np.nan for vi in v]
-                    df[f'min_{col}_gap{gap}']=[np.nanmin(vi) if len(vi) else np.nan for vi in v]
-                    df[f'std_{col}_gap{gap}']=[np.nanstd(vi) if len(vi) else np.nan for vi in v]
-                    df[f'sum_{col}_gap{gap}']=[np.nansum(vi) if len(vi) else np.nan for vi in v]
-                    
+                    self.PrintColor(f"-> for column {col} gap{gap}",color=Fore.RED)
+                    list_col_df[f"{col}_gap{gap}"]=list_col_df.groupby(['index'])[col].diff(gap)
+                    group_cols.append( f"{col}_gap{gap}" )
+
+                AGGREGATIONS = ['nunique','count','min','max','first','last', 'mean','median','sum','std','skew']#kurtosis
+                list_col_agg_df = list_col_df[['index']+group_cols].groupby(['index']).agg(AGGREGATIONS)
+                list_col_agg_df.columns = ['_'.join(x) for x in list_col_agg_df.columns]
+                df=df.merge(list_col_agg_df,on='index',how='left')
+                df[f'{col}_len']=df[col].apply(len)
+                
+                # df[f'ptp_{col}']=df[f'max_{col}']-df[f'min_{col}']
+                # df[f'mean_{col}/std_{col}']=df[f'mean_{col}']/df[f'std_{col}']
+                #drop index after using.
+                df.drop(['index'],axis=1,inplace=True)
+        
         if len(self.word2vec_models):#word2vec transform
             self.word2vec_cols=[]
             for (model,col,model_name) in self.word2vec_models:
@@ -437,6 +431,29 @@ class Yunbase():
         best_params['verbose']=-1
         print(f"best_params={best_params}")
         return best_params
+
+    def load_data(self,path_or_file='train.csv',mode='train'):
+        if mode=='train':
+            #read csv,parquet or csv_file
+            self.train_path_or_file=path_or_file
+        try:
+            file=pl.read_csv(path_or_file)
+            file=file.to_pandas()
+        except:
+            try:
+                file=pl.read_parquet(path_or_file)
+                file=file.to_pandas()
+            except:#file.copy()
+                file=path_or_file.copy()
+        #polars to pandas.
+        if isinstance(file, pl.DataFrame):
+            file=file.to_pandas()
+        if not isinstance(file, pd.DataFrame):
+            raise ValueError("train_path_or_file is not pd.DataFrame")
+        if mode=='train':
+            self.train=file.copy()
+        else:
+            self.test=file.copy()
     
     # return oof_preds and metric_score
     # can use optuna to find params.If use optuna,then not save models.
@@ -522,27 +539,15 @@ class Yunbase():
         self.drop_cols+=drop_cols
     
     def fit(self,train_path_or_file='train.csv'):
-        print("fit......")
-        print("< load train data >")
-        #read csv,parquet or csv_file
-        self.train_path_or_file=train_path_or_file
-        try:
-            self.train=pl.read_csv(self.train_path_or_file)
-            self.train=self.train.to_pandas()
+        self.PrintColor("fit......",color=Fore.GREEN)
+        self.PrintColor("load train data")
+        self.load_data(path_or_file=train_path_or_file,mode='train')
+        try:#list_cols TypeError: unhashable type: 'list'
+            self.train=self.train.drop_duplicates()
         except:
-            try:
-                self.train=pl.read_parquet(self.train_path_or_file)
-                self.train=self.train.to_pandas()
-            except:#file.copy()
-                self.train=self.train_path_or_file.copy()
-        #polars to pandas.
-        if isinstance(self.train, pl.DataFrame):
-            self.train=self.train.to_pandas()
-        if not isinstance(self.train, pd.DataFrame):
-            raise ValueError("train_path_or_file is not pd.DataFrame")
-        self.train=self.train.drop_duplicates()
+            pass
         print(f"train.shape:{self.train.shape}")
-        print("< Feature Engineer >")
+        self.PrintColor("Feature Engineer")
         self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
         
         #choose cross validation
@@ -591,7 +596,7 @@ class Yunbase():
         self.target=y.values
         
         #if you don't use your own models,then use built-in models.
-        print("< load models >")
+        self.PrintColor("load models")
         if len(self.models)==0:
             
             metric=self.metric
@@ -698,7 +703,7 @@ class Yunbase():
             print(f"xgb_params:{xgb_params}")
             print(f"cat_params:{cat_params}")
 
-        print("< model training >")
+        self.PrintColor("model training")
         for (model,model_name) in self.models:
             oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,use_optuna=False)
             print(f"{self.metric}:{metric_score}")
@@ -706,8 +711,8 @@ class Yunbase():
                 np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
         
     def predict(self,test_path_or_file='test.csv',weights=None,load_path=''):
-        print("predict......")
-        print("< weight normalization >")
+        self.PrintColor("predict......",color=Fore.GREEN)
+        self.PrintColor("< weight normalization >")
         #if train and inference in different notebook,then
         self.load_path=load_path
         #weights:[1]*len(self.models)
@@ -728,29 +733,17 @@ class Yunbase():
             oof_preds+=weights[i]*oof_pred
         oof_preds=oof_preds/n
         print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
-        print("< load test data >")
-        #parse csv,parquet
-        try:
-            self.test=pl.read_csv(test_path_or_file)
-            self.test=self.test.to_pandas()
-        except:
-            try:#parquet
-                self.test=pl.read_parquet(test_path_or_file)
-                self.test=self.test.to_pandas()
-            except:#file.copy
-                self.test=test_path_or_file.copy()
-        #polars to pandas
-        if isinstance(self.test, pl.DataFrame):
-            self.test=self.test.to_pandas()
-        if not isinstance(self.test, pd.DataFrame):
-            raise ValueError("test_path_or_file is not pd.DataFrame")
+        
+        self.PrintColor("load test data")
+        self.load_data(test_path_or_file,mode='test')
         print(f"test.shape:{self.test.shape}")
-        print("< Feature Engineer >")
+        
+        self.PrintColor("Feature Engineer")
         self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         self.test=self.test.rename(columns=self.col2name)
+        self.PrintColor("prediction on test data")
         if self.objective=='regression':
-            print("< prediction on test data >")
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             cnt=0
             for (model_name,fold) in self.model_paths:
