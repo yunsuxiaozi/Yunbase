@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/21
+@update_time:2024/10/22
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -18,7 +18,9 @@ from xgboost import XGBRegressor,XGBClassifier
 import dill#serialize and deserialize objects (such as saving and loading tree models)
 import optuna#automatic hyperparameter optimization framework
 from colorama import Fore, Style #print colorful text
+import re#python's built-in regular expressions.
 from scipy.stats import kurtosis#calculate kurt
+from sklearn.feature_extraction.text import CountVectorizer,TfidfVectorizer#word2vec feature
 import warnings#avoid some negligible errors
 #The filterwarnings () method is used to set warning filters, which can control the output method and level of warning information.
 warnings.filterwarnings('ignore')
@@ -49,7 +51,9 @@ class Yunbase():
                       list_cols=[],
                       list_gaps=[1],
                       word2vec_models=[],
+                      text_cols=[],
                       print_feature_importance=False,
+                      log=100,
                 ):
         """
         num_folds             :the number of folds for k-fold cross validation.
@@ -85,8 +89,10 @@ class Yunbase():
         list_cols             :If the data in a column is a list or str(list), this can be used to extract features.
         list_gaps             :extract features for list_cols.example=[1,2,4]
         word2vec_models       :Use models such as tfidf to extract features of string columns 
-                               example:word2vec_models=[(TfidfVectorizer(),col,model_name)]
+                               example:word2vec_models=[(TfidfVectorizer(max_features=250,ngram_range=(2,3)),col,model_name)]
+        text_cols             :extract features of words, sentences, and paragraphs from text here.
         print_feature_importance: after model training,whether print feature importance or not
+        log                   : log trees are trained in the GBDT model to output a validation set score once.
         """
         
         #currented supported metric
@@ -164,9 +170,14 @@ class Yunbase():
         self.list_gaps=sorted(list_gaps)
         self.word2vec_models=word2vec_models
         self.word2vec_cols=[]#origin cols that need to use in tfidf model.
+        self.text_cols=text_cols#extract features of words, sentences, and paragraphs from text here.
         self.print_feature_importance=print_feature_importance
-        self.col2name=None#Due to the presence of special characters in some column names, 
+        #Due to the presence of special characters in some column names, 
         #they cannot be directly passed into the LGB model training, so conversion is required
+        self.col2name=None
+        self.log=log
+        #common AGGREGATIONS
+        self.AGGREGATIONS = ['nunique','count','min','max','first','last', 'mean','median','sum','std','skew']#kurtosis
     
     #print colorful text
     def PrintColor(self,text,color = Fore.BLUE):
@@ -232,6 +243,87 @@ class Yunbase():
         if self.FE!=None:
             #use your custom metric first
             df=self.FE(df)
+        #text feature extract,such as word,sentence,paragraph.
+        #The reason why it needs to be done earlier is that it will generate columns such as nunique=1 or
+        #object that need to be dropped, so it needs to be placed before finding these columns.
+        if len(self.text_cols):
+            print("< text column's feature >")
+            df['index']=np.arange(len(df))
+            for tcol in self.text_cols:
+                
+                #data processing
+                df[tcol]=df[tcol].apply(lambda x:x.lower())
+                #split by ps
+                ps='!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
+                for i in range(len(ps)):
+                    df[tcol+f"split_ps{i}_count"]=df[tcol].apply(lambda x:len(x.split(ps[i])))
+                
+                self.PrintColor(f"-> for column {tcol} word feature",color=Fore.RED)
+                tcol_word_df=df[['index',tcol]].copy()
+                #get word_list   [index,tcol,word_list]
+                tcol_word_df['word']=tcol_word_df[tcol].apply(lambda x: re.split('\\.|\\?|\\!\\ |\\,',x))
+                #[index,single_word]
+                tcol_word_df=tcol_word_df.explode('word')[['index','word']]
+                #[index,single_word,single_word_len]
+                tcol_word_df['word_len'] = tcol_word_df['word'].apply(len)
+                #data clean [index,single_word,single_word_len]
+                tcol_word_df=tcol_word_df[tcol_word_df['word_len']!=0]
+                #for word features, extract the difference in length between the two words before and after.
+                group_cols=['word_len']
+                for gap in [1]:
+                    for col in ['word_len']:
+                        tcol_word_df[f'{col}_diff{gap}']=tcol_word_df.groupby(['index'])[col].diff(gap)
+                        group_cols.append(f'{col}_diff{gap}')
+                tcol_word_agg_df = tcol_word_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
+                tcol_word_agg_df.columns = ['_'.join(x) for x in tcol_word_agg_df.columns]
+                df=df.merge(tcol_word_agg_df,on='index',how='left')
+                
+                self.PrintColor(f"-> for column {tcol} sentence feature",color=Fore.RED)
+                tcol_sent_df=df[['index',tcol]].copy()
+                #get sent_list   [index,tcol,sent_list]
+                tcol_sent_df['sent']=tcol_sent_df[tcol].apply(lambda x: re.split('\\.|\\?|\\!',x))
+                #[index,single_sent]
+                tcol_sent_df=tcol_sent_df.explode('sent')[['index','sent']]
+                #[index,single_sent,single_sent_len]
+                tcol_sent_df['sent_len'] = tcol_sent_df['sent'].apply(len)
+                tcol_sent_df['sent_word_count'] = tcol_sent_df['sent'].apply(lambda x:len(re.split('\\ |\\,',x)))
+                #data clean [index,single_sent,single_sent_len]
+                group_cols=['sent_len','sent_word_count']
+                for gcol in group_cols:
+                    tcol_sent_df=tcol_sent_df[tcol_sent_df[gcol]!=0]
+                #for sent features, extract the difference in length between the two sents before and after.
+                for gap in [1]:
+                    for col in ['sent_len','sent_word_count']:
+                        tcol_sent_df[f'{col}_diff{gap}']=tcol_sent_df.groupby(['index'])[col].diff(gap)
+                        group_cols.append(f'{col}_diff{gap}')
+                tcol_sent_agg_df = tcol_sent_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
+                tcol_sent_agg_df.columns = ['_'.join(x) for x in tcol_sent_agg_df.columns]
+                df=df.merge(tcol_sent_agg_df,on='index',how='left')
+                
+                self.PrintColor(f"-> for column {tcol} paragraph feature",color=Fore.RED)
+                tcol_para_df=df[['index',tcol]].copy()
+                #get para_list   [index,tcol,para_list]
+                tcol_para_df['para']=tcol_para_df[tcol].apply(lambda x: x.split("\n"))
+                #[index,single_para]
+                tcol_para_df=tcol_para_df.explode('para')[['index','para']]
+                tcol_para_df['para_len'] = tcol_para_df['para'].apply(len)
+                tcol_para_df['para_sent_count'] = tcol_para_df['para'].apply(lambda x: len(re.split('\\.|\\?|\\!',x)))
+                tcol_para_df['para_word_count'] = tcol_para_df['para'].apply(lambda x: len(re.split('\\.|\\?|\\!\\ |\\,',x)))
+                #data clean [index,single_sent,single_sent_len]
+                group_cols=['para_len','para_sent_count','para_word_count']
+                for gcol in group_cols:
+                    tcol_para_df=tcol_para_df[tcol_para_df[gcol]!=0]
+                #for sent features, extract the difference in length between the two sents before and after.
+                for gap in [1]:
+                    for col in ['para_len','para_sent_count','para_word_count']:
+                        tcol_para_df[f'{col}_diff{gap}']=tcol_para_df.groupby(['index'])[col].diff(gap)
+                        group_cols.append(f'{col}_diff{gap}')
+                tcol_para_agg_df = tcol_para_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
+                tcol_para_agg_df.columns = ['_'.join(x) for x in tcol_para_agg_df.columns]
+                df=df.merge(tcol_para_agg_df,on='index',how='left')
+            
+            df.drop(['index'],axis=1,inplace=True)
+        
         if mode=='train':
             #missing value 
             self.nan_cols=[col for col in df.columns if df[col].isna().mean()>self.nan_margin]
@@ -281,14 +373,15 @@ class Yunbase():
                     list_col_df[f"{col}_gap{gap}"]=list_col_df.groupby(['index'])[col].diff(gap)
                     group_cols.append( f"{col}_gap{gap}" )
 
-                AGGREGATIONS = ['nunique','count','min','max','first','last', 'mean','median','sum','std','skew']#kurtosis
-                list_col_agg_df = list_col_df[['index']+group_cols].groupby(['index']).agg(AGGREGATIONS)
+                list_col_agg_df = list_col_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
                 list_col_agg_df.columns = ['_'.join(x) for x in list_col_agg_df.columns]
                 df=df.merge(list_col_agg_df,on='index',how='left')
                 df[f'{col}_len']=df[col].apply(len)
                 
-                # df[f'ptp_{col}']=df[f'max_{col}']-df[f'min_{col}']
-                # df[f'mean_{col}/std_{col}']=df[f'mean_{col}']/df[f'std_{col}']
+                for gcol in group_cols:
+                    df[f'ptp_{gcol}']=df[f'max_{gcol}']-df[f'min_{gcol}']
+                    df[f'mean_{gcol}/std_{gcol}']=df[f'mean_{gcol}']/df[f'std_{gcol}']
+                
                 #drop index after using.
                 df.drop(['index'],axis=1,inplace=True)
         
@@ -337,9 +430,9 @@ class Yunbase():
                 try:
                     model=self.pickle_load(self.load_path+f'{model_name}_{col}_fold{fold}.model')
                 except:
-                    model.fit(df[col])
+                    model.fit(df[col].apply(lambda x:x.lower()))
                     self.pickle_dump(model,f'{model_name}_{col}_fold{fold}.model') 
-                word2vec_feats=model.transform(df[col]).toarray()
+                word2vec_feats=model.transform(df[col].apply(lambda x:x.lower())).toarray()
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
         df.drop(self.word2vec_colnames+self.labelencoder_colnames,axis=1,inplace=True)
@@ -458,7 +551,7 @@ class Yunbase():
     # return oof_preds and metric_score
     # can use optuna to find params.If use optuna,then not save models.
     def cross_validation(self,X,y,group,kf,model,model_name,use_optuna=False):
-        log=100
+        log=self.log
         if use_optuna:
             log=10000
         if self.objective=='regression':
@@ -616,6 +709,8 @@ class Yunbase():
                     metric='auc'
                 elif self.objective=='multi_class':
                     metric='multi_logloss'
+            if metric=='accuracy':
+                metric='auc'
             lgb_params={"boosting_type": "gbdt","metric": metric,
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.05,
                         "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
@@ -712,7 +807,7 @@ class Yunbase():
         
     def predict(self,test_path_or_file='test.csv',weights=None,load_path=''):
         self.PrintColor("predict......",color=Fore.GREEN)
-        self.PrintColor("< weight normalization >")
+        self.PrintColor("weight normalization")
         #if train and inference in different notebook,then
         self.load_path=load_path
         #weights:[1]*len(self.models)
