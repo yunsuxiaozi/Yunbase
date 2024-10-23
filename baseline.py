@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/22
+@update_time:2024/10/23
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -178,7 +178,7 @@ class Yunbase():
         self.log=log
         #common AGGREGATIONS
         self.AGGREGATIONS = ['nunique','count','min','max','first','last', 'mean','median','sum','std','skew']#kurtosis
-    
+        self.sample_weight=None
     #print colorful text
     def PrintColor(self,text,color = Fore.BLUE):
         print(color + text + Style.RESET_ALL)
@@ -252,7 +252,7 @@ class Yunbase():
             for tcol in self.text_cols:
                 
                 #data processing
-                df[tcol]=df[tcol].apply(lambda x:x.lower())
+                df[tcol]=(df[tcol].fillna('nan')).apply(lambda x:x.lower())
                 #split by ps
                 ps='!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
                 for i in range(len(ps)):
@@ -410,6 +410,7 @@ class Yunbase():
         if len(self.labelencoder_colnames):
             print("< label encoder >")
             for col in self.labelencoder_colnames:
+                self.PrintColor(f"-> for column {col} labelencoder feature",color=Fore.RED)
                 #load model when model is existed,fit when model isn't exist.
                 try:
                     le=self.pickle_load(self.load_path+f'le_{col}_fold{fold}.model')
@@ -425,7 +426,9 @@ class Yunbase():
         if len(self.word2vec_models):
             print("< word2vec >")
             for (model,col,model_name) in self.word2vec_models:
+                self.PrintColor(f"-> for column {col} {model_name} word2vec feature",color=Fore.RED)
                 col=self.col2name[col]
+                df[col]=df[col].fillna('nan')
                 #load when model is existed.fit when model isn't existed.
                 try:
                     model=self.pickle_load(self.load_path+f'{model_name}_{col}_fold{fold}.model')
@@ -504,7 +507,7 @@ class Yunbase():
                 model=LGBMRegressor(**params)
             else:
                 model=LGBMClassifier(**params)
-            oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,use_optuna=True)
+            oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,X,y,group,kf,model,model_name,self.sample_weight,use_optuna=True)
             return metric_score
         #'minimize' or 'maximize'
         if self.metric in ['accuracy','auc','f1_score','mcc']:
@@ -550,7 +553,7 @@ class Yunbase():
     
     # return oof_preds and metric_score
     # can use optuna to find params.If use optuna,then not save models.
-    def cross_validation(self,X,y,group,kf,model,model_name,use_optuna=False):
+    def cross_validation(self,X,y,group,kf,model,model_name,sample_weight,use_optuna=False):
         log=self.log
         if use_optuna:
             log=10000
@@ -566,6 +569,8 @@ class Yunbase():
 
             X_train=self.CV_FE(X_train,mode='train',fold=fold)
             X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
+
+            sample_weight_train=sample_weight[train_index]
             
             if (self.use_pseudo_label) and (type(self.test)==pd.DataFrame):
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
@@ -573,9 +578,11 @@ class Yunbase():
                 test_y=test_copy[self.target_col]
                 X_train=pd.concat((X_train,test_X),axis=0)
                 y_train=pd.concat((y_train,test_y),axis=0)
+                sample_weight_train=np.ones(len(X_train))
             
             if 'lgb' in model_name:
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
+                         sample_weight=sample_weight_train,
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
                     )
                 if (use_optuna==False) and (self.print_feature_importance):#print feature importance when not use optuna to find params.
@@ -595,9 +602,11 @@ class Yunbase():
             elif 'cat' in model_name:
                 model.fit(X_train, y_train,
                       eval_set=(X_valid, y_valid),
+                      sample_weight=sample_weight_train,
                       early_stopping_rounds=self.early_stop, verbose=log)
             elif 'xgb' in model_name:
-                model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],verbose=log)
+                model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
+                          sample_weight=sample_weight_train,verbose=log)
             else:#other models
                 model.fit(X_train,y_train) 
 
@@ -631,10 +640,14 @@ class Yunbase():
         print(f"drop_cols={drop_cols}")
         self.drop_cols+=drop_cols
     
-    def fit(self,train_path_or_file='train.csv'):
+    def fit(self,train_path_or_file='train.csv',sample_weight=None):
+        #lightgbm:https://github.com/microsoft/LightGBM/blob/master/python-package/lightgbm/sklearn.py
+        #xgboost:https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/sklearn.py
+        self.sample_weight=sample_weight
         self.PrintColor("fit......",color=Fore.GREEN)
         self.PrintColor("load train data")
         self.load_data(path_or_file=train_path_or_file,mode='train')
+        self.target_dtype=self.train[self.target_col].dtype
         try:#list_cols TypeError: unhashable type: 'list'
             self.train=self.train.drop_duplicates()
         except:
@@ -657,6 +670,11 @@ class Yunbase():
         
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
+
+        if self.sample_weight==None:
+            self.sample_weight=np.ones(len(y.values))
+        if self.sample_weight.shape!=y.values.reshape(-1).shape:
+            raise ValueError(f"shape of sample_weight must be {y.values.reshape(-1).shape}")
         
         #special characters in columns'name will lead to errors when GBDT model training.
         self.col2name={}
@@ -800,7 +818,7 @@ class Yunbase():
 
         self.PrintColor("model training")
         for (model,model_name) in self.models:
-            oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,use_optuna=False)
+            oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,self.sample_weight,use_optuna=False)
             print(f"{self.metric}:{metric_score}")
             if self.save_oof_preds:#if oof_preds is needed
                 np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
@@ -962,9 +980,13 @@ class Yunbase():
 
     #save test_preds to submission.csv
     def submit(self,submission_path='submission.csv',test_preds=None,save_name='yunbase'):
+        self.PrintColor('submission......',color = Fore.GREEN)
         submission=pd.read_csv(submission_path)
         submission[self.target_col]=test_preds
         if self.objective!='regression':
             if self.metric!='auc':
                 submission[self.target_col]=submission[self.target_col].apply(lambda x:self.idx2target[x])
+        #target is True and False
+        if self.target_dtype==bool:
+            submission[self.target_col]=submission[self.target_col].astype(bool)
         submission.to_csv(f"{save_name}.csv",index=None)
