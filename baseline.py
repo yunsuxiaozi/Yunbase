@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/23
+@update_time:2024/10/24
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -24,6 +24,15 @@ from sklearn.feature_extraction.text import CountVectorizer,TfidfVectorizer#word
 import warnings#avoid some negligible errors
 #The filterwarnings () method is used to set warning filters, which can control the output method and level of warning information.
 warnings.filterwarnings('ignore')
+
+import random#provide some function to generate random_seed.
+#set random seed,to make sure model can be recurrented.
+def seed_everything(seed):
+    np.random.seed(seed)#numpy's random seed
+    random.seed(seed)#python built-in random seed
+seed_everything(seed=2024)
+
+
 class Yunbase():
     def __init__(self,num_folds=5,
                       models=[],
@@ -54,6 +63,7 @@ class Yunbase():
                       text_cols=[],
                       print_feature_importance=False,
                       log=100,
+                      exp_mode=False,
                 ):
         """
         num_folds             :the number of folds for k-fold cross validation.
@@ -93,6 +103,8 @@ class Yunbase():
         text_cols             :extract features of words, sentences, and paragraphs from text here.
         print_feature_importance: after model training,whether print feature importance or not
         log                   : log trees are trained in the GBDT model to output a validation set score once.
+        exp_mode              :In regression tasks, the distribution of target_col is a long tail distribution, 
+                               and this parameter can be used to perform log transform on the target_col.
         """
         
         #currented supported metric
@@ -176,6 +188,16 @@ class Yunbase():
         #they cannot be directly passed into the LGB model training, so conversion is required
         self.col2name=None
         self.log=log
+        self.exp_mode=exp_mode
+        
+        if self.exp_mode not in [True,False]:
+            raise ValueError("exp_mode must be True or False")  
+        if (self.objective!='regression') and (self.exp_mode==True):
+            raise ValueError("exp_mode must be False in classification task.")
+        #when log transform, it is necessary to ensure that the minimum value of the target is greater than 0.
+        #so target=target-min_target. b is -min_target.
+        self.exp_mode_b=0
+        
         #common AGGREGATIONS
         self.AGGREGATIONS = ['nunique','count','min','max','first','last', 'mean','median','sum','std','skew']#kurtosis
         self.sample_weight=None
@@ -617,7 +639,11 @@ class Yunbase():
             if not use_optuna:#not find_params(training)
                 self.pickle_dump(model,f'{model_name}_fold{fold}.model')
                 self.model_paths.append((model_name,fold))
-        metric_score=self.Metric(y.values,oof_preds)
+        if self.exp_mode:#y and oof need expm1.
+            #log(y+b)
+            metric_score=self.Metric(np.expm1(y.values)-self.exp_mode_b,np.expm1(oof_preds)-self.exp_mode_b )
+        else:
+            metric_score=self.Metric(y.values,oof_preds)
         return oof_preds,metric_score
     
     def drop_high_correlation_feats(self,df):
@@ -670,6 +696,9 @@ class Yunbase():
         
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
+        if self.exp_mode:#use log transform for target_col
+            self.exp_mode_b=-y.min()
+            y=np.log1p(y+self.exp_mode_b)
 
         if self.sample_weight==None:
             self.sample_weight=np.ones(len(y.values))
@@ -839,13 +868,17 @@ class Yunbase():
         #normalization
         weights=weights*(self.num_folds*n)/np.sum(weights)
 
-        #calculate oof score       
-        oof_preds=np.zeros_like(np.load(f"{self.models[0//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy"))
-        for i in range(0,len(weights),self.num_folds):
-            oof_pred=np.load(f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
-            oof_preds+=weights[i]*oof_pred
-        oof_preds=oof_preds/n
-        print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
+        #calculate oof score if save_oof_preds
+        if self.save_oof_preds:
+            oof_preds=np.zeros_like(np.load(f"{self.models[0//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy"))
+            for i in range(0,len(weights),self.num_folds):
+                oof_pred=np.load(f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
+                oof_preds+=weights[i]*oof_pred
+            oof_preds=oof_preds/n
+            if self.exp_mode:
+                print(f"final_{self.metric}:{self.Metric( np.expm1( self.target)-self.exp_mode_b,np.expm1( oof_preds)-self.exp_mode_b )}")
+            else:
+                print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
         
         self.PrintColor("load test data")
         self.load_data(test_path_or_file,mode='test')
@@ -886,7 +919,8 @@ class Yunbase():
                     test_preds[cnt]=test_pred
                     cnt+=1
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
-            
+            if self.exp_mode:
+                test_preds=np.expm1(test_preds)-self.exp_mode_b       
             if self.save_test_preds:
                 np.save('test_preds.npy',test_preds)
             return test_preds
