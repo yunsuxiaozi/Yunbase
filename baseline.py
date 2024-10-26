@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/24
+@update_time:2024/10/26
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -21,6 +21,7 @@ from colorama import Fore, Style #print colorful text
 import re#python's built-in regular expressions.
 from scipy.stats import kurtosis#calculate kurt
 from sklearn.feature_extraction.text import CountVectorizer,TfidfVectorizer#word2vec feature
+import ftfy#fixes text for you,correct unicode issues.
 import warnings#avoid some negligible errors
 #The filterwarnings () method is used to set warning filters, which can control the output method and level of warning information.
 warnings.filterwarnings('ignore')
@@ -200,7 +201,7 @@ class Yunbase():
         
         #common AGGREGATIONS
         self.AGGREGATIONS = ['nunique','count','min','max','first','last', 'mean','median','sum','std','skew']#kurtosis
-        self.sample_weight=None
+        self.sample_weight=1
     #print colorful text
     def PrintColor(self,text,color = Fore.BLUE):
         print(color + text + Style.RESET_ALL)
@@ -259,6 +260,13 @@ class Yunbase():
         print('Decreased by {:.1f}%'.format(100 * (start_mem - end_mem) / start_mem))
 
         return df
+     
+    def clean_text(self,text):
+        text=text.lower()
+        #correct unicode issues.
+        text=ftfy.fix_text(text)
+        return text
+        
         
     #basic Feature Engineer,mode='train' or 'test' ,drop_cols is other cols you want to delete.
     def base_FE(self,df,mode='train',drop_cols=[]):
@@ -274,7 +282,7 @@ class Yunbase():
             for tcol in self.text_cols:
                 
                 #data processing
-                df[tcol]=(df[tcol].fillna('nan')).apply(lambda x:x.lower())
+                df[tcol]=(df[tcol].fillna('nan')).apply(lambda x:self.clean_text(x))
                 #split by ps
                 ps='!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
                 for i in range(len(ps)):
@@ -455,9 +463,9 @@ class Yunbase():
                 try:
                     model=self.pickle_load(self.load_path+f'{model_name}_{col}_fold{fold}.model')
                 except:
-                    model.fit(df[col].apply(lambda x:x.lower()))
+                    model.fit(df[col].apply( lambda x: self.clean_text(x)  )  )
                     self.pickle_dump(model,f'{model_name}_{col}_fold{fold}.model') 
-                word2vec_feats=model.transform(df[col].apply(lambda x:x.lower())).toarray()
+                word2vec_feats=model.transform(df[col].apply(lambda x: self.clean_text(x)  )).toarray()
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
         df.drop(self.word2vec_colnames+self.labelencoder_colnames,axis=1,inplace=True)
@@ -528,8 +536,8 @@ class Yunbase():
             if self.objective=='regression':
                 model=LGBMRegressor(**params)
             else:
-                model=LGBMClassifier(**params)
-            oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,X,y,group,kf,model,model_name,self.sample_weight,use_optuna=True)
+                model=LGBMClassifier(**params)   
+            oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,self.sample_weight,use_optuna=True)
             return metric_score
         #'minimize' or 'maximize'
         if self.metric in ['accuracy','auc','f1_score','mcc']:
@@ -666,7 +674,7 @@ class Yunbase():
         print(f"drop_cols={drop_cols}")
         self.drop_cols+=drop_cols
     
-    def fit(self,train_path_or_file='train.csv',sample_weight=None):
+    def fit(self,train_path_or_file='train.csv',sample_weight=1):
         #lightgbm:https://github.com/microsoft/LightGBM/blob/master/python-package/lightgbm/sklearn.py
         #xgboost:https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/sklearn.py
         self.sample_weight=sample_weight
@@ -699,9 +707,9 @@ class Yunbase():
         if self.exp_mode:#use log transform for target_col
             self.exp_mode_b=-y.min()
             y=np.log1p(y+self.exp_mode_b)
-
-        if self.sample_weight==None:
-            self.sample_weight=np.ones(len(y.values))
+        if type(self.sample_weight)==int:#sample_weight=1,so no custom weights
+            self.sample_weight=np.ones(len(y))
+            
         if self.sample_weight.shape!=y.values.reshape(-1).shape:
             raise ValueError(f"shape of sample_weight must be {y.values.reshape(-1).shape}")
         
