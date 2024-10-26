@@ -12,4 +12,3 @@ colorama
 regex
 scipy
 ftfy
-random
