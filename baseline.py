@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/26
+@update_time:2024/10/27
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -65,6 +65,7 @@ class Yunbase():
                       print_feature_importance=False,
                       log=100,
                       exp_mode=False,
+                      use_reduce_memory=False,
                 ):
         """
         num_folds             :the number of folds for k-fold cross validation.
@@ -106,6 +107,7 @@ class Yunbase():
         log                   : log trees are trained in the GBDT model to output a validation set score once.
         exp_mode              :In regression tasks, the distribution of target_col is a long tail distribution, 
                                and this parameter can be used to perform log transform on the target_col.
+        use_reduce_memory     :if use function reduce_mem_usage(),then set this parameter True.
         """
         
         #currented supported metric
@@ -190,11 +192,13 @@ class Yunbase():
         self.col2name=None
         self.log=log
         self.exp_mode=exp_mode
-        
         if self.exp_mode not in [True,False]:
             raise ValueError("exp_mode must be True or False")  
         if (self.objective!='regression') and (self.exp_mode==True):
             raise ValueError("exp_mode must be False in classification task.")
+        self.use_reduce_memory=use_reduce_memory
+        if self.use_reduce_memory not in [True,False]:
+            raise ValueError("use_reduce_memory must be True or False")  
         #when log transform, it is necessary to ensure that the minimum value of the target is greater than 0.
         #so target=target-min_target. b is -min_target.
         self.exp_mode_b=0
@@ -202,6 +206,14 @@ class Yunbase():
         #common AGGREGATIONS
         self.AGGREGATIONS = ['nunique','count','min','max','first','last', 'mean','median','sum','std','skew']#kurtosis
         self.sample_weight=1
+        
+        #If inference one batch of data at a time requires repeatedly loading the model,
+        #it will increase the program's running time.we need to save  in dictionary when load.
+        self.path2le={}
+        self.path2wordvec={}
+        self.path2gbdt={}
+        
+        
     #print colorful text
     def PrintColor(self,text,color = Fore.BLUE):
         print(color + text + Style.RESET_ALL)
@@ -430,7 +442,8 @@ class Yunbase():
         total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols
         total_drop_cols=[col for col in total_drop_cols if col not in self.word2vec_cols+self.labelencoder_cols]
         df.drop(total_drop_cols,axis=1,inplace=True,errors='ignore')
-        df=self.reduce_mem_usage(df, float16_as32=True)
+        if self.use_reduce_memory:
+            df=self.reduce_mem_usage(df, float16_as32=True)
         print("-"*30)
         return df
     
@@ -443,14 +456,18 @@ class Yunbase():
                 self.PrintColor(f"-> for column {col} labelencoder feature",color=Fore.RED)
                 #load model when model is existed,fit when model isn't exist.
                 try:
-                    le=self.pickle_load(self.load_path+f'le_{col}_fold{fold}.model')
+                    le=self.path2le[self.load_path+f'le_{col}_fold{fold}.model']
                 except:
-                    value=df[col].values
-                    le={}
-                    for v in value:
-                        if v in le.keys():
-                            le[v]=len(le)
-                    self.pickle_dump(le,f'le_{col}_fold{fold}.model')
+                    try:
+                        le=self.pickle_load(self.load_path+f'le_{col}_fold{fold}.model')
+                        self.path2le[ self.load_path+f'le_{col}_fold{fold}.model' ]=le
+                    except:
+                        value=df[col].values
+                        le={}
+                        for v in value:
+                            if v in le.keys():
+                                le[v]=len(le)
+                        self.pickle_dump(le,f'le_{col}_fold{fold}.model')
                 df[col+"_le"] = df[col].apply(lambda x:le.get(x,-1))
 
         if len(self.word2vec_models):
@@ -461,10 +478,14 @@ class Yunbase():
                 df[col]=df[col].fillna('nan')
                 #load when model is existed.fit when model isn't existed.
                 try:
-                    model=self.pickle_load(self.load_path+f'{model_name}_{col}_fold{fold}.model')
+                    model=self.path2wordvec[ self.load_path+f'{model_name}_{col}_fold{fold}.model' ]
                 except:
-                    model.fit(df[col].apply( lambda x: self.clean_text(x)  )  )
-                    self.pickle_dump(model,f'{model_name}_{col}_fold{fold}.model') 
+                    try:
+                        model=self.pickle_load(self.load_path+f'{model_name}_{col}_fold{fold}.model')
+                        self.path2wordvec[ self.load_path+f'{model_name}_{col}_fold{fold}.model' ]=model
+                    except:
+                        model.fit(df[col].apply( lambda x: self.clean_text(x)  )  )
+                        self.pickle_dump(model,f'{model_name}_{col}_fold{fold}.model') 
                 word2vec_feats=model.transform(df[col].apply(lambda x: self.clean_text(x)  )).toarray()
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
@@ -862,7 +883,6 @@ class Yunbase():
         
     def predict(self,test_path_or_file='test.csv',weights=None,load_path=''):
         self.PrintColor("predict......",color=Fore.GREEN)
-        self.PrintColor("weight normalization")
         #if train and inference in different notebook,then
         self.load_path=load_path
         #weights:[1]*len(self.models)
@@ -871,7 +891,8 @@ class Yunbase():
         if weights==None:
             weights=np.ones(n)
         if len(weights)!=n:
-            raise ValueError(f"length of weights must be len(models)")
+            raise ValueError(f"length of weights must be {len(models)}")
+        self.PrintColor("weight normalization")
         weights=np.array([w for w in weights for f in range(self.num_folds)],dtype=np.float32)
         #normalization
         weights=weights*(self.num_folds*n)/np.sum(weights)
@@ -901,7 +922,11 @@ class Yunbase():
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             cnt=0
             for (model_name,fold) in self.model_paths:
-                model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                try:
+                    model=self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model' ]
+                except:
+                    model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                    self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model' ]=model
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
                 test_pred=np.zeros(len(self.test))
                 for i in range(0,len(self.test),self.infer_size):
@@ -919,7 +944,11 @@ class Yunbase():
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
                 cnt=0
                 for (model_name,fold) in self.model_paths:
-                    model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                    try:
+                        model=self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']
+                    except:
+                        model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                        self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']=model
                     test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
                     test_pred=np.zeros(len(self.test))
                     for i in range(0,len(self.test),self.infer_size):
@@ -936,7 +965,11 @@ class Yunbase():
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
             cnt=0
             for (model_name,fold) in self.model_paths:
-                model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                try:
+                    model=self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']
+                except:
+                    model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                    self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']=model
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
                 test_pred=np.zeros((len(self.test),self.num_classes))
                 for i in range(0,len(self.test),self.infer_size):
@@ -954,7 +987,11 @@ class Yunbase():
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
                 fold=0
                 for (model_name,fold) in self.model_paths:
-                    model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                    try:
+                        model=self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']
+                    except:
+                        model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
+                        self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']=model
                     test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
                     test_pred=np.zeros((len(self.test),self.num_classes))
                     for i in range(0,len(self.test),self.infer_size):
