@@ -12,3 +12,5 @@ colorama
 regex
 scipy
 ftfy
+nltk
+emoji

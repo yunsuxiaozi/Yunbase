@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/27
+@update_time:2024/10/28
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -18,10 +18,16 @@ from xgboost import XGBRegressor,XGBClassifier
 import dill#serialize and deserialize objects (such as saving and loading tree models)
 import optuna#automatic hyperparameter optimization framework
 from colorama import Fore, Style #print colorful text
-import re#python's built-in regular expressions.
 from scipy.stats import kurtosis#calculate kurt
+
+#deal with text
+import re#python's built-in regular expressions.
 from sklearn.feature_extraction.text import CountVectorizer,TfidfVectorizer#word2vec feature
 import ftfy#fixes text for you,correct unicode issues.
+import nltk #Natural Language toolkit
+from nltk.corpus import stopwords#import english stopwords
+import emoji#deal with emoji in natrual language
+
 import warnings#avoid some negligible errors
 #The filterwarnings () method is used to set warning filters, which can control the output method and level of warning information.
 warnings.filterwarnings('ignore')
@@ -212,8 +218,7 @@ class Yunbase():
         self.path2le={}
         self.path2wordvec={}
         self.path2gbdt={}
-        
-        
+          
     #print colorful text
     def PrintColor(self,text,color = Fore.BLUE):
         print(color + text + Style.RESET_ALL)
@@ -235,7 +240,6 @@ class Yunbase():
         #memory_usage()是df每列的内存使用量,sum是对它们求和, B->KB->MB
         start_mem = df.memory_usage().sum() / 1024**2
         print('Memory usage of dataframe is {:.2f} MB'.format(start_mem))
-
         for col in df.columns:#遍历每列的列名
             col_type = df[col].dtype#列名的type
             if col_type != object and str(col_type)!='category':#不是object也就是说这里处理的是数值类型的变量
@@ -270,16 +274,37 @@ class Yunbase():
         end_mem = df.memory_usage().sum() / 1024**2
         print('Memory usage after optimization is: {:.2f} MB'.format(end_mem))
         print('Decreased by {:.1f}%'.format(100 * (start_mem - end_mem) / start_mem))
-
         return df
      
     def clean_text(self,text):
-        text=text.lower()
+        ############################## fix text #######################################################
+        #transform emoji to " "+text+" ".
+        text=emoji.demojize(text,delimiters=(" ", " "))
         #correct unicode issues.
         text=ftfy.fix_text(text)
+        #lower         example:'Big' and 'big'
+        text=text.lower()
+        ############################## remove meaningless text ########################################
+        #remove <b>  <p> meaningless
+        html=re.compile(r'<.*?>')
+        text=html.sub(r'',text)
+        #remove url '\w+':(word character,[a-zA-Z0-9_])
+        text=re.sub("http\w+",'',text)
+        #remove @yunsuxiaozi   person_name 
+        text=re.sub("@\w+",'',text)
+        #drop single character,they are meaningless. 'space a space'
+        text=re.sub("\s[a-z]\s",'',text)
+        #remove number
+        text=re.sub("\d+",'',text)
+        #drop english stopwords,they are meaningless.
+        english_stopwords = stopwords.words('english')
+        text_list=text.split(" ")
+        text_list=[t for t in text_list if t not in english_stopwords]
+        text=" ".join(text_list)
+        #drop space front and end.
+        text=text.strip()
         return text
-        
-        
+         
     #basic Feature Engineer,mode='train' or 'test' ,drop_cols is other cols you want to delete.
     def base_FE(self,df,mode='train',drop_cols=[]):
         if self.FE!=None:
@@ -291,8 +316,7 @@ class Yunbase():
         if len(self.text_cols):
             print("< text column's feature >")
             df['index']=np.arange(len(df))
-            for tcol in self.text_cols:
-                
+            for tcol in self.text_cols:  
                 #data processing
                 df[tcol]=(df[tcol].fillna('nan')).apply(lambda x:self.clean_text(x))
                 #split by ps
@@ -362,8 +386,7 @@ class Yunbase():
                         group_cols.append(f'{col}_diff{gap}')
                 tcol_para_agg_df = tcol_para_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
                 tcol_para_agg_df.columns = ['_'.join(x) for x in tcol_para_agg_df.columns]
-                df=df.merge(tcol_para_agg_df,on='index',how='left')
-            
+                df=df.merge(tcol_para_agg_df,on='index',how='left') 
             df.drop(['index'],axis=1,inplace=True)
         
         if mode=='train':
@@ -560,7 +583,7 @@ class Yunbase():
                 model=LGBMClassifier(**params)   
             oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,self.sample_weight,use_optuna=True)
             return metric_score
-        #'minimize' or 'maximize'
+        #direction is 'minimize' or 'maximize'
         if self.metric in ['accuracy','auc','f1_score','mcc']:
             direction='maximize'
         elif self.metric in ['medae','mae','rmse','mse','logloss','rmsle']:
@@ -741,11 +764,10 @@ class Yunbase():
             self.col2name[list(X.columns)[i]]=f'col_{i}'
             self.name2col[f'col_{i}']=list(X.columns)[i]
         X=X.rename(columns=self.col2name)
+        print(f"feature_count:{len(list(X.columns))}")
         
         self.word2vec_colnames=[self.col2name[col] for col in self.word2vec_cols]
         self.labelencoder_colnames=[self.col2name[col] for col in self.labelencoder_cols]
-        
-        print(f"feature_count:{len(list(X.columns))}")
                 
         #classification:target2idx,idx2target
         if self.objective!='regression':
@@ -845,7 +867,6 @@ class Yunbase():
                        'random_strength'     : 0.25, 
                        'verbose'             : 0,
                       }
-            
             xgb_params={'random_state': self.seed, 'n_estimators': 10000, 
                         'learning_rate': 0.01, 'max_depth': 10,
                         'reg_alpha': 0.08, 'reg_lambda': 0.8, 
