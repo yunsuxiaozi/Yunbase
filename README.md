@@ -1,160 +1,193 @@
-## Yunbase,First submission of the algorithm competition
+# 🚀Yunbase,first submission of your algorithm competition
 
-In the competition of data mining,there are many operations that need to be done in every time.Many of these operations, from data preprocessing to k-fold cross validation, are repetitive.It's a bit troublesome to write repetitive code every time, so I extracted the common parts among these operations and wrote the Yunbase class here.(Yun is my name yunsuxiaozi,base is the baseline of competition)
+<img src="yunbase.png" alt="yunbase title image" style="zoom:100%;" />
+
+In the competition of data mining,there are many operations that need to be done in every time.Many of these operations,from data preprocessing to k-fold cross validation,are repetitive.It's a bit troublesome to write repetitive code every time,so I extracted the common parts among these operations and wrote the Yunbase class here.('Yun' is my name <b>yunsuxiaozi</b>,'base' is the baseline of competition)
+
+
 
 ### Get Started Quickly
 
-1.clone 
+1.git clone 
 
 ```python
-!git clone https://github.com/yunsuxiaozi/Yunbase.git 
+!git clone https://github.com/yunsuxiaozi/Yunbase.git
 ```
 
-2.install according to  requirement.txt
+2.download wheel in requirements.txt
+
+```python
+!pip download -r Yunbase/requirements.txt
+```
+
+3.install according to  requirements.txt
 
 ```python
 !pip install -q --requirement yourpath/Yunbase/requirements.txt  \
 --no-index --find-links file:yourpath
 ```
 
-3.import Yunbase
+4.import Yunbase
 
 ```python
 from Yunbase.baseline import Yunbase
 ```
 
-4.create Yunbase,All the parameters are below, and you can flexibly choose parameters according to the task
+5.create Yunbase.
+
+All the parameters are below, and you can flexibly choose parameters according to the task.
 
 ```python
-yunbase=Yunbase(      num_folds=5,
-                      models=[],
-                      FE=None,
-                      drop_cols=[],
-                      seed=2024,
-                      objective='regression',
-                      metric='mse',
-                      nan_margin=0.95,
-                      group_col=None,
-                      num_classes=None,
-                      target_col='target',
-                      infer_size=10000,
-                      save_oof_preds=True,
-                      save_test_preds=True,
-                      device='cpu',
-                      one_hot_max=50,
-                      custom_metric=None,
-                      use_optuna_find_params=0,
-                      optuna_direction=None,
-                      early_stop=100,
-                      use_pseudo_label=False,
-                      use_high_corr_feat=True,
-                      labelencoder_cols=[],
-                      list_cols=[],
-                      list_gaps=[1],
-                      word2vec_models=[],
-                      text_cols=[],
-                      print_feature_importance=False,
-                      log=100,
-                      exp_mode=False,
-                      use_reduce_memory=False,
+yunbase=Yunbase(num_folds=5,
+                models=[],
+                FE=None,
+                drop_cols=[],
+                seed=2024,
+                objective='regression',
+                metric='mse',
+                nan_margin=0.95,
+                group_col=None,
+                num_classes=None,
+                target_col='target',
+                infer_size=10000,
+                save_oof_preds=True,
+                save_test_preds=True,
+                device='cpu',
+                one_hot_max=50,
+                custom_metric=None,
+                use_optuna_find_params=0,
+                optuna_direction=None,
+                early_stop=100,
+                use_pseudo_label=False,
+                use_high_corr_feat=True,
+                labelencoder_cols=[],
+                list_cols=[],
+                list_gaps=[1],
+                word2vec_models=[],
+                text_cols=[],
+                print_feature_importance=False,
+                log=100,
+                exp_mode=False,
+                use_reduce_memory=False,
             )
 ```
 
-- num_folds:the number of folds for k-fold cross validation.
+- num_folds:<b>int</b>.the number of folds for k-fold cross validation.
 
-- models:Built in 3 GBDTs as baseline, you can also use custom models,
-                                 such as models=[(LGBMRegressor(**lgb_params),'lgb')]
+- models:<b>list of models</b>.Built in 3 GBDTs as baseline, you can also use custom models,such as models=[(LGBMRegressor(**lgb_params),'lgb')].
                              
-- FE:In addition to the built-in feature engineer, you can also customize feature engineer.
+- FE:<b>function</b>.In addition to the built-in feature engineer, you can also customize feature engineer.For example:
 
-- drop_cols:The column to be deleted after all feature engineering is completed.
-
-- seed:random seed.
-
-- objective:what task do you want to do?regression,binary or multi_class?
-
-- metric:metric to evaluate your model.
-
-- nan_margin:when the proportion of missing values in a column is greater than, we delete this column.
-
-- group_col:if you want to use groupkfold,then define this group_col.
-
-- num_classes:if objectibe is multi_class,you should define this class.
-
-- target_col:the column that you want to predict.s
-
-- infer_size:the test data might be large,we can predict in batches.
-
-- save_oof_preds:you can save OOF for offline study.
-
-- save_test_preds:you can save test_preds.For multi classification tasks, the predicted result is the category.If you need to save the probability of the test_data,you can save test_preds.                         
-
-- device:GBDT can training on GPU,you can set this parameter like NN.
-
-- one_hot_max:If the nunique of a column is less than a certain value, perform one hot encoder.
-
-- custom_metric:your custom_metric,when objective is multi_class,y_pred in custom(y_true,y_pred) is probability.
-
-- use_optuna_find_params:count of use optuna find best params,0 is not use optuna to find params.Currently only LGBM is supported.
-
-- optuna_direction:'minimize' or 'maximize',when you use custom metric,you need to define.the direction of optimization.
-
-- early_stop:Common parameters of GBDT.
-
-- use_pseudo_label:Whether to use pseudo labels.When it is true,adding the test data to the training data and training again after obtaining the predicted results of the test data.
-
-- use_high_corr_feat:whether to use high correlation features or not. 
-
-- labelencoder_cols:Convert categorical string variables into [1,2,……,n].
-
-- list_cols:If the data in a column is a list or str(list), this can be used to extract features.
-
-- list_gaps:extract features for list_cols.example=[1,2,4].
-
-- word2vec_models:Use models such as tfidf to extract features of string columns 
-                                 example:word2vec_models=[(TfidfVectorizer(),col,model_name)]
-                             
-- text_cols:extract features of words, sentences, and paragraphs from text here.
-
-- print_feature_importance:after model training,whether print feature importance or not
-
-- log:log trees are trained in the GBDT model to output a validation set score once.
-
-- exp_mode:In regression tasks, the distribution of target_col is a long tail distribution, and this parameter can be used to perform log transform on the target_col.
-
-- use_reduce_memory:if use function reduce_mem_usage(),then set this parameter True.
+     ```python
+     def FE(df):
+         return df.drop(['id'],axis=1)
+     ```
 
      
 
-4.Model training
+- drop_cols:<b>list</b>.The column to be deleted after all feature engineering is completed.
 
-At present, it supports read CSV, Parquet files, or CSV files that have already been read.
+- seed:<b>int</b>.random seed.
+
+- objective:<b>str</b>.what task do you want to do?<b>regression</b>,<b>binary</b> or <b>multi_class</b>?
+
+- metric:<b>str</b>.metric to evaluate your model.
+
+- nan_margin:<b>float</b>.when the proportion of missing values in a column is greater than, we delete this column.
+
+- group_col:<b>str</b>.if you want to use groupkfold,then define this group_col.
+
+- num_classes:<b>int</b>.if objectibe is multi_class or binary,you should define this class.
+
+- target_col:<b>str</b>.the column that you want to predict.
+
+- infer_size:<b>int</b>.the test data might be large,we can predict in batches.
+
+- save_oof_preds:<b>bool</b>.you can save OOF for your own offline study.
+
+- save_test_preds:<b>bool</b>.you can save test_preds.For multi classification tasks, the predicted result is the category.If you need to save the probability of the test_data,you can use save_test_preds.                         
+
+- device:<b>str</b>.GBDT can training on GPU,you can set this parameter like NN.
+
+- one_hot_max:<b>int</b>.If the nunique of a column is less than a certain value, perform one hot encoder.
+
+- custom_metric:<b>function</b>.your custom_metric.
+
+     <b>Attention:when objective is multi_class,y_pred in custom(y_true,y_pred) is probability.</b>
+
+- use_optuna_find_params:<b>int</b>.count of use optuna find best params,0 is not use optuna to find params.Currently only LGBM is supported.
+
+- optuna_direction:<b>str</b>.'minimize' or 'maximize',when you use custom metric,you need to define.the direction of optimization.
+
+- early_stop:<b>int</b>.Common parameters of GBDT.
+
+- use_pseudo_label:<b>bool</b>.Whether to use pseudo labels.When it is true,adding the test data to the training data and training again after obtaining the predicted results of the test data.
+
+- use_high_corr_feat:<b>bool</b>.whether to use high correlation features or not. 
+
+- labelencoder_cols:<b>list</b>.Convert categorical string variables into [1,2,……,n].
+
+- list_cols:<b>list</b>.If the data in a column is a list or str(list), this can be used to extract features.
+
+- list_gaps:<b>list</b>.extract features for list_cols.example=[1,2,4].
+
+- word2vec_models:<b>list</b>.Use models such as tfidf to extract features of string columns.For example:word2vec_models=[(TfidfVectorizer(),col,model_name)].
+                             
+- text_cols:<b>list</b>.extract features of words, sentences, and paragraphs from text here.
+
+- print_feature_importance:<b>bool</b>.after model training,whether print feature importance or not.
+
+- log:<b>int</b>.log trees are trained in the GBDT model to output a validation set score once.
+
+- exp_mode:<b>bool</b>.In regression tasks, the distribution of target_col is a long tail distribution, and this parameter can be used to perform log transform on the target_col.
+
+- use_reduce_memory:<b>bool</b>.if use function reduce_mem_usage(),then set this parameter True.
+
+
+6.yunbase training
+
+At present, it supports read csv, parquet files according to path, or csv files that have already been read.
 
 ```python
-yunbase.fit(train_path_or_file='train.csv',sample_weight=1)
+yunbase.fit(train_path_or_file='train.csv',sample_weight=np.ones(len(train)))
 ```
 
-5.Model inference
+7.yunbase inference
 
 ```python
 test_preds=yunbase.predict(test_path_or_file="test.csv"，weights=[1,1,1],load_path='')
 ```
 
-6.save test_preds to submission.csv
+- load_path:If training and inference are conducted in different notebooks, load_path during inference can be done using.
+
+8.save test_preds to submission.csv
 
 ```python
 yunbase.submit(submission_path='sample_submission.csv',test_preds=test_preds,save_name='yunbase')
 ```
 
-- save_name can change,if you set  'submission',it will give you 'submission.csv'.
+- save_name can be changed.if you set  'submission',it will give you 'submission.csv'.
 
-7.ensemble
+9.ensemble
 
 ```python
 yunbase.ensemble(solution_paths_or_files,weights=None)
 ```
 
-train data and test data can be seen as below.
+- For example:
+
+  ```python
+  solution_paths_or_files=[
+  'submission1.csv',
+  'submission2.csv',
+  'submission3.csv'
+  ]
+  weights=[3,3,4]
+  ```
+
+  
+
+10.train data and test data can be seen as below.
 
 ```python
 yunbase.train,yunbase.test
@@ -162,15 +195,15 @@ yunbase.train,yunbase.test
 
 
 
-### You can refer to this <a href="https://www.kaggle.com/code/yunsuxiaozi/brist1d-yunbase">notebook</a> to learn usage of Yunbase.
+### <a href="https://www.kaggle.com/code/yunsuxiaozi/yunbase">Here</a> is a static version that can be used to play Kaggle competition.You can refer to this <a href="https://www.kaggle.com/code/yunsuxiaozi/brist1d-yunbase">notebook</a> to learn usage of Yunbase. 
 
 
 
 ### follow-up work
 
-The code has now completed a rough framework and will continue to be improved by adding new features based on bug fixes.
+The code has now completed a rough framework and will continue to be improved by adding new functions based on bug fixes.
 
-In principle, fix as many bugs as I discover and add as many new features as I think of.
+<b>In principle, fix as many bugs as I discover and add as many new features as I think of.</b>
 
 1.add kfold such as <b>repeat</b>kfold.
 
@@ -178,7 +211,7 @@ In principle, fix as many bugs as I discover and add as many new features as I t
 
 3.fit function to <b>np.array</b>.(such as model.fit(train_X,train_y),model.predict(test_X))
 
-4.add more useful <b>metric</b>.
+4.add more common <b>metric</b>.
 
 5.In addition to kfold, <b>single model</b> training and inference are also implemented.
 
@@ -190,4 +223,4 @@ Waiting for updates.
 
 Kaggle:https://www.kaggle.com/yunsuxiaozi
 
- update time:2024/10/27(baseline.py and README may not synchronize updates)
+ update time:2024/10/28(baseline.py and README may not synchronize updates)
