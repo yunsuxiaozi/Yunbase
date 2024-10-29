@@ -218,6 +218,7 @@ class Yunbase():
         self.path2le={}
         self.path2wordvec={}
         self.path2gbdt={}
+        self.onehot_valuecounts={}
           
     #print colorful text
     def PrintColor(self,text,color = Fore.BLUE):
@@ -410,6 +411,15 @@ class Yunbase():
             col,nunique=self.one_hot_cols[i]
             for u in nunique:
                 df[f"{col}_{u}"]=(df[col]==u).astype(np.int8)
+            #one_hot_value_count
+            try:
+                col_valuecounts=self.onehot_valuecounts[col]
+            except:
+                col_valuecounts=df[col].value_counts().to_dict()
+                self.onehot_valuecounts[col]=col_valuecounts
+            df[col+"_valuecounts"]=df[col].apply(lambda x:col_valuecounts.get(x,np.nan))
+            df[col+"_valuecounts"]=df[col+"_valuecounts"].apply(lambda x:np.nan if x<5 else x)
+            
         for i in range(len(self.nunique_2_cols)):
             c,u=self.nunique_2_cols[i]
             df[f"{c}_{u}"]=(df[c]==u).astype(np.int8)
@@ -810,7 +820,7 @@ class Yunbase():
             if metric=='accuracy':
                 metric='auc'
             lgb_params={"boosting_type": "gbdt","metric": metric,
-                        'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.05,
+                        'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.1,
                         "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
                         "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
                         }
@@ -860,7 +870,7 @@ class Yunbase():
                        'eval_metric'         : metric,
                        'bagging_temperature' : 0.50,
                        'iterations'          : 10000,
-                       'learning_rate'       : 0.08,
+                       'learning_rate'       : 0.1,
                        'max_depth'           : 12,
                        'l2_leaf_reg'         : 1.25,
                        'min_data_in_leaf'    : 24,
@@ -868,7 +878,7 @@ class Yunbase():
                        'verbose'             : 0,
                       }
             xgb_params={'random_state': self.seed, 'n_estimators': 10000, 
-                        'learning_rate': 0.01, 'max_depth': 10,
+                        'learning_rate': 0.1, 'max_depth': 10,
                         'reg_alpha': 0.08, 'reg_lambda': 0.8, 
                         'subsample': 0.95, 'colsample_bytree': 0.6, 
                         'min_child_weight': 3,'early_stopping_rounds':self.early_stop,
