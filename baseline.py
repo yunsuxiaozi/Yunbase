@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/28
+@update_time:2024/10/30
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -15,6 +15,8 @@ from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor,CatBoostClassifier
 from xgboost import XGBRegressor,XGBClassifier
+import copy#copy object
+import gc#rubbish collection
 import dill#serialize and deserialize objects (such as saving and loading tree models)
 import optuna#automatic hyperparameter optimization framework
 from colorama import Fore, Style #print colorful text
@@ -38,7 +40,6 @@ def seed_everything(seed):
     np.random.seed(seed)#numpy's random seed
     random.seed(seed)#python built-in random seed
 seed_everything(seed=2024)
-
 
 class Yunbase():
     def __init__(self,num_folds=5,
@@ -180,13 +181,11 @@ class Yunbase():
         self.optuna_direction=optuna_direction
         if (self.use_optuna_find_params) and (self.custom_metric!=None) and self.optuna_direction not in ['minimize','maximize']:
             raise ValueError("optuna_direction must be 'minimize' or 'maximize'")
-        self.model_paths=[]#training model path
         self.early_stop=early_stop
         self.test=None#test data will be replaced when call predict function.
         self.use_pseudo_label=use_pseudo_label
         self.use_high_corr_feat=use_high_corr_feat
         self.labelencoder_cols=labelencoder_cols
-        self.load_path=""#If train and inference in different notebook,we should change the path model load.
         self.list_cols=list(set(list_cols))
         self.list_gaps=sorted(list_gaps)
         self.word2vec_models=word2vec_models
@@ -215,9 +214,9 @@ class Yunbase():
         
         #If inference one batch of data at a time requires repeatedly loading the model,
         #it will increase the program's running time.we need to save  in dictionary when load.
-        self.path2le={}
-        self.path2wordvec={}
-        self.path2gbdt={}
+        self.trained_models=[]#trained model
+        self.trained_le={}
+        self.trained_wordvec={}
         self.onehot_valuecounts={}
           
     #print colorful text
@@ -489,18 +488,15 @@ class Yunbase():
                 self.PrintColor(f"-> for column {col} labelencoder feature",color=Fore.RED)
                 #load model when model is existed,fit when model isn't exist.
                 try:
-                    le=self.path2le[self.load_path+f'le_{col}_fold{fold}.model']
-                except:
-                    try:
-                        le=self.pickle_load(self.load_path+f'le_{col}_fold{fold}.model')
-                        self.path2le[ self.load_path+f'le_{col}_fold{fold}.model' ]=le
-                    except:
-                        value=df[col].values
-                        le={}
-                        for v in value:
-                            if v in le.keys():
-                                le[v]=len(le)
-                        self.pickle_dump(le,f'le_{col}_fold{fold}.model')
+                    le=self.trained_le[f'le_{col}_fold{fold}.model']
+                except:#training
+                    value=df[col].values
+                    le={}
+                    for v in value:
+                        if v in le.keys():
+                            le[v]=len(le)
+                    self.pickle_dump(le,f'le_{col}_fold{fold}.model')
+                    self.trained_le[f'le_{col}_fold{fold}.model']=le
                 df[col+"_le"] = df[col].apply(lambda x:le.get(x,-1))
 
         if len(self.word2vec_models):
@@ -511,14 +507,11 @@ class Yunbase():
                 df[col]=df[col].fillna('nan')
                 #load when model is existed.fit when model isn't existed.
                 try:
-                    model=self.path2wordvec[ self.load_path+f'{model_name}_{col}_fold{fold}.model' ]
+                    model=self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]
                 except:
-                    try:
-                        model=self.pickle_load(self.load_path+f'{model_name}_{col}_fold{fold}.model')
-                        self.path2wordvec[ self.load_path+f'{model_name}_{col}_fold{fold}.model' ]=model
-                    except:
-                        model.fit(df[col].apply( lambda x: self.clean_text(x)  )  )
-                        self.pickle_dump(model,f'{model_name}_{col}_fold{fold}.model') 
+                    model.fit(df[col].apply( lambda x: self.clean_text(x)  )  )
+                    self.pickle_dump(model,f'{model_name}_{col}_fold{fold}.model') 
+                    self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]=model
                 word2vec_feats=model.transform(df[col].apply(lambda x: self.clean_text(x)  )).toarray()
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
@@ -700,7 +693,7 @@ class Yunbase():
                 oof_preds[valid_index]=model.predict_proba(X_valid)
             if not use_optuna:#not find_params(training)
                 self.pickle_dump(model,f'{model_name}_fold{fold}.model')
-                self.model_paths.append((model_name,fold))
+                self.trained_models.append(copy.deepcopy(model))
         if self.exp_mode:#y and oof need expm1.
             #log(y+b)
             metric_score=self.Metric(np.expm1(y.values)-self.exp_mode_b,np.expm1(oof_preds)-self.exp_mode_b )
@@ -912,10 +905,8 @@ class Yunbase():
             if self.save_oof_preds:#if oof_preds is needed
                 np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
         
-    def predict(self,test_path_or_file='test.csv',weights=None,load_path=''):
+    def predict(self,test_path_or_file='test.csv',weights=None):
         self.PrintColor("predict......",color=Fore.GREEN)
-        #if train and inference in different notebook,then
-        self.load_path=load_path
         #weights:[1]*len(self.models)
         n=len(self.models)
         #if you don't set weights,then calculate mean value as result.
@@ -952,13 +943,9 @@ class Yunbase():
         if self.objective=='regression':
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             cnt=0
-            for (model_name,fold) in self.model_paths:
-                try:
-                    model=self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model' ]
-                except:
-                    model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
-                    self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model' ]=model
-                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
+            for idx in range(len(self.trained_models)): 
+                model=self.trained_models[idx]
+                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
                 test_pred=np.zeros(len(self.test))
                 for i in range(0,len(self.test),self.infer_size):
                     test_pred[i:i+self.infer_size]=model.predict(test_copy[i:i+self.infer_size])
@@ -969,18 +956,14 @@ class Yunbase():
             #use pseudo label
             if self.use_pseudo_label:
                 self.test[self.target_col]=test_preds
-                self.model_paths=[]
+                self.trained_models=[]
                 self.fit(self.train_path_or_file)
                 
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
                 cnt=0
-                for (model_name,fold) in self.model_paths:
-                    try:
-                        model=self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']
-                    except:
-                        model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
-                        self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']=model
-                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
+                for idx in range(len(self.trained_models)):
+                    model=self.trained_models[idx]
+                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
                     test_pred=np.zeros(len(self.test))
                     for i in range(0,len(self.test),self.infer_size):
                         test_pred[i:i+self.infer_size]=model.predict(test_copy.drop([self.target_col],axis=1)[i:i+self.infer_size])
@@ -995,13 +978,9 @@ class Yunbase():
         else:#classification 
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
             cnt=0
-            for (model_name,fold) in self.model_paths:
-                try:
-                    model=self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']
-                except:
-                    model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
-                    self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']=model
-                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
+            for idx in range(len(self.trained_models)):
+                model=self.trained_models[idx]
+                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
                 test_pred=np.zeros((len(self.test),self.num_classes))
                 for i in range(0,len(self.test),self.infer_size):
                     test_pred[i:i+self.infer_size]=model.predict_proba(test_copy[i:i+self.infer_size])
@@ -1012,18 +991,14 @@ class Yunbase():
             #use pseudo label
             if self.use_pseudo_label:
                 self.test[self.target_col]=np.argmax(test_preds,axis=1)
-                self.model_paths=[]
+                self.trained_models=[]
                 self.fit(self.train_path_or_file)
 
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
                 fold=0
-                for (model_name,fold) in self.model_paths:
-                    try:
-                        model=self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']
-                    except:
-                        model=self.pickle_load(self.load_path+f'{model_name}_fold{fold}.model')
-                        self.path2gbdt[self.load_path+f'{model_name}_fold{fold}.model']=model
-                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
+                for idx in range(len(self.trained_models)):
+                    model=self.trained_models[idx]
+                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
                     test_pred=np.zeros((len(self.test),self.num_classes))
                     for i in range(0,len(self.test),self.infer_size):
                         test_pred[i:i+self.infer_size]=model.predict_proba(test_copy.drop([self.target_col],axis=1)[i:i+self.infer_size])
