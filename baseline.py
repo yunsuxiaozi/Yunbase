@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/10/30
+@update_time:2024/11/01
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -64,6 +64,7 @@ class Yunbase():
                       early_stop=100,
                       use_pseudo_label=False,
                       use_high_corr_feat=True,
+                      cross_cols=[],
                       labelencoder_cols=[],
                       list_cols=[],
                       list_gaps=[1],
@@ -115,6 +116,7 @@ class Yunbase():
         exp_mode              :In regression tasks, the distribution of target_col is a long tail distribution, 
                                and this parameter can be used to perform log transform on the target_col.
         use_reduce_memory     :if use function reduce_mem_usage(),then set this parameter True.
+        cross_cols            :Construct features for adding, subtracting, multiplying, and dividing these columns.
         """
         
         #currented supported metric
@@ -185,6 +187,7 @@ class Yunbase():
         self.test=None#test data will be replaced when call predict function.
         self.use_pseudo_label=use_pseudo_label
         self.use_high_corr_feat=use_high_corr_feat
+        self.cross_cols=cross_cols
         self.labelencoder_cols=labelencoder_cols
         self.list_cols=list(set(list_cols))
         self.list_gaps=sorted(list_gaps)
@@ -395,7 +398,7 @@ class Yunbase():
             #nunique=1
             self.unique_cols=[col for col in df.drop(self.list_cols,axis=1,errors='ignore').columns if(df[col].nunique()==1)]
             #object dtype
-            self.object_cols=[col for col in df.columns if (df[col].dtype==object) and (col!=self.group_col)]
+            self.object_cols=[col for col in df.columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
             #one_hot_cols
             self.one_hot_cols=[]
             self.nunique_2_cols=[]
@@ -469,6 +472,15 @@ class Yunbase():
         if (mode=='train') and (self.use_high_corr_feat==False):#drop high correlation features
             print("< drop high correlation feature >")
             self.drop_high_correlation_feats(df)
+       
+        if len(self.cross_cols)!=0:
+            print("< cross feature >")
+            for i in range(len(self.cross_cols)):
+                for j in range(i+1,len(self.cross_cols)):
+                    df[self.cross_cols[i]+"+"+self.cross_cols[j]]=df[self.cross_cols[i]]+df[self.cross_cols[j]]
+                    df[self.cross_cols[i]+"-"+self.cross_cols[j]]=df[self.cross_cols[i]]-df[self.cross_cols[j]]
+                    df[self.cross_cols[i]+"*"+self.cross_cols[j]]=df[self.cross_cols[i]]*df[self.cross_cols[j]]
+                    df[self.cross_cols[i]+"/"+self.cross_cols[j]]=df[self.cross_cols[i]]/(df[self.cross_cols[j]]+1e-10)
         
         print("< drop useless cols >")
         total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols
@@ -485,34 +497,39 @@ class Yunbase():
         if len(self.labelencoder_colnames):
             print("< label encoder >")
             for col in self.labelencoder_colnames:
-                self.PrintColor(f"-> for column {col} labelencoder feature",color=Fore.RED)
+                self.PrintColor(f"-> for column {self.name2col[col]} labelencoder feature",color=Fore.RED)
                 #load model when model is existed,fit when model isn't exist.
                 try:
                     le=self.trained_le[f'le_{col}_fold{fold}.model']
                 except:#training
-                    value=df[col].values
+                    value=df[col].value_counts().to_dict()
+                    new_value={}
+                    for k,v in value.items():
+                        if v<10:
+                            new_value[k]=v
+                    value=new_value
                     le={}
                     for v in value:
                         if v in le.keys():
                             le[v]=len(le)
                     self.pickle_dump(le,f'le_{col}_fold{fold}.model')
-                    self.trained_le[f'le_{col}_fold{fold}.model']=le
+                    self.trained_le[f'le_{col}_fold{fold}.model']=copy.deepcopy(le)
                 df[col+"_le"] = df[col].apply(lambda x:le.get(x,-1))
 
         if len(self.word2vec_models):
             print("< word2vec >")
-            for (model,col,model_name) in self.word2vec_models:
+            for (word2vec,col,model_name) in self.word2vec_models:
                 self.PrintColor(f"-> for column {col} {model_name} word2vec feature",color=Fore.RED)
                 col=self.col2name[col]
                 df[col]=df[col].fillna('nan')
                 #load when model is existed.fit when model isn't existed.
                 try:
-                    model=self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]
+                    word2vec=self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]
                 except:
-                    model.fit(df[col].apply( lambda x: self.clean_text(x)  )  )
-                    self.pickle_dump(model,f'{model_name}_{col}_fold{fold}.model') 
-                    self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]=model
-                word2vec_feats=model.transform(df[col].apply(lambda x: self.clean_text(x)  )).toarray()
+                    word2vec.fit(df[col].apply( lambda x: self.clean_text(x)  )  )
+                    self.pickle_dump(word2vec,f'{model_name}_{col}_fold{fold}.model') 
+                    self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]=copy.deepcopy(word2vec)
+                word2vec_feats=word2vec.transform(df[col].apply(lambda x: self.clean_text(x)  )).toarray()
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
         df.drop(self.word2vec_colnames+self.labelencoder_colnames,axis=1,inplace=True)
@@ -913,7 +930,7 @@ class Yunbase():
         if weights==None:
             weights=np.ones(n)
         if len(weights)!=n:
-            raise ValueError(f"length of weights must be {len(models)}")
+            raise ValueError(f"length of weights must be {len(self.models)}")
         self.PrintColor("weight normalization")
         weights=np.array([w for w in weights for f in range(self.num_folds)],dtype=np.float32)
         #normalization
