@@ -21,6 +21,7 @@ import dill#serialize and deserialize objects (such as saving and loading tree m
 import optuna#automatic hyperparameter optimization framework
 from colorama import Fore, Style #print colorful text
 from scipy.stats import kurtosis#calculate kurt
+import os#interact with operation system
 
 #deal with text
 import re#python's built-in regular expressions.
@@ -42,39 +43,39 @@ def seed_everything(seed):
 seed_everything(seed=2024)
 
 class Yunbase():
-    def __init__(self,num_folds=5,
-                      models=[],
+    def __init__(self,num_folds:int=5,
+                      models:list[tuple]=[],
                       FE=None,
-                      drop_cols=[],
-                      seed=2024,
-                      objective='regression',
-                      metric='mse',
-                      nan_margin=0.95,
+                      drop_cols:list[str]=[],
+                      seed:int=2024,
+                      objective:str='regression',
+                      metric:str='mse',
+                      nan_margin:float=0.95,
                       group_col=None,
                       num_classes=None,
-                      target_col='target',
-                      infer_size=10000,
-                      save_oof_preds=True,
-                      save_test_preds=True,
-                      device='cpu',
-                      one_hot_max=50,
+                      target_col:str='target',
+                      infer_size:int=10000,
+                      save_oof_preds:bool=True,
+                      save_test_preds:bool=True,
+                      device:str='cpu',
+                      one_hot_max:int=50,
                       custom_metric=None,
-                      use_optuna_find_params=0,
+                      use_optuna_find_params:int=0,
                       optuna_direction=None,
-                      early_stop=100,
-                      use_pseudo_label=False,
-                      use_high_corr_feat=True,
-                      cross_cols=[],
-                      labelencoder_cols=[],
-                      list_cols=[],
-                      list_gaps=[1],
-                      word2vec_models=[],
-                      text_cols=[],
-                      print_feature_importance=False,
-                      log=100,
-                      exp_mode=False,
-                      use_reduce_memory=False,
-                ):
+                      early_stop:int=100,
+                      use_pseudo_label:bool=False,
+                      use_high_corr_feat:bool=True,
+                      cross_cols:list[str]=[],
+                      labelencoder_cols:list[str]=[],
+                      list_cols:list[str]=[],
+                      list_gaps:list[int]=[1],
+                      word2vec_models:list[tuple]=[],
+                      text_cols:list[str]=[],
+                      print_feature_importance:bool=False,
+                      log:int=100,
+                      exp_mode:bool=False,
+                      use_reduce_memory:bool=False,
+                )->None:
         """
         num_folds             :the number of folds for k-fold cross validation.
         models                :Built in 3 GBDTs as baseline, you can also use custom models,
@@ -221,25 +222,29 @@ class Yunbase():
         self.trained_le={}
         self.trained_wordvec={}
         self.onehot_valuecounts={}
+        #make folder to save model trained.such as GBDT,word2vec.
+        self.model_save_path="Yunbase_info/"
+        if not os.path.exists(self.model_save_path):
+            os.mkdir(self.model_save_path)
           
     #print colorful text
-    def PrintColor(self,text,color = Fore.BLUE):
+    def PrintColor(self,text:str='',color = Fore.BLUE)->None:
         print(color + text + Style.RESET_ALL)
     
     #save models after training
-    def pickle_dump(self,obj, path):
+    def pickle_dump(self,obj, path:str)->None:
         #open path,binary write
         with open(path, mode="wb") as f:
             dill.dump(obj, f, protocol=4)
     #load models when inference
-    def pickle_load(self,path):
+    def pickle_load(self,path:str):
         #open path,binary read
         with open(path, mode="rb") as f:
             data = dill.load(f)
             return data
         
     #Traverse all columns of df, modify data types to reduce memory usage
-    def reduce_mem_usage(self,df, float16_as32=True):
+    def reduce_mem_usage(self,df:pd.DataFrame, float16_as32:bool=True)->pd.DataFrame:
         #memory_usage()是df每列的内存使用量,sum是对它们求和, B->KB->MB
         start_mem = df.memory_usage().sum() / 1024**2
         print('Memory usage of dataframe is {:.2f} MB'.format(start_mem))
@@ -279,7 +284,7 @@ class Yunbase():
         print('Decreased by {:.1f}%'.format(100 * (start_mem - end_mem) / start_mem))
         return df
      
-    def clean_text(self,text):
+    def clean_text(self,text:str='')->str:
         ############################## fix text #######################################################
         #transform emoji to " "+text+" ".
         text=emoji.demojize(text,delimiters=(" ", " "))
@@ -309,7 +314,7 @@ class Yunbase():
         return text
          
     #basic Feature Engineer,mode='train' or 'test' ,drop_cols is other cols you want to delete.
-    def base_FE(self,df,mode='train',drop_cols=[]):
+    def base_FE(self,df:pd.DataFrame,mode:str='train',drop_cols:list[str]=[])->pd.DataFrame:
         if self.FE!=None:
             #use your custom metric first
             df=self.FE(df)
@@ -492,7 +497,7 @@ class Yunbase():
         return df
     
     #Feature engineering that needs to be done internally in cross validation.
-    def CV_FE(self,df,mode='train',fold=0):
+    def CV_FE(self,df:pd.DataFrame,mode:str='train',fold:int=0)->pd.DataFrame:
         #labelencoder
         if len(self.labelencoder_colnames):
             print("< label encoder >")
@@ -512,7 +517,7 @@ class Yunbase():
                     for v in value:
                         if v in le.keys():
                             le[v]=len(le)
-                    self.pickle_dump(le,f'le_{col}_fold{fold}.model')
+                    self.pickle_dump(le,self.model_save_path+f'le_{col}_fold{fold}.model')
                     self.trained_le[f'le_{col}_fold{fold}.model']=copy.deepcopy(le)
                 df[col+"_le"] = df[col].apply(lambda x:le.get(x,-1))
 
@@ -527,7 +532,7 @@ class Yunbase():
                     word2vec=self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]
                 except:
                     word2vec.fit(df[col].apply( lambda x: self.clean_text(x)  )  )
-                    self.pickle_dump(word2vec,f'{model_name}_{col}_fold{fold}.model') 
+                    self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_fold{fold}.model') 
                     self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]=copy.deepcopy(word2vec)
                 word2vec_feats=word2vec.transform(df[col].apply(lambda x: self.clean_text(x)  )).toarray()
                 for i in range(word2vec_feats.shape[1]):
@@ -541,7 +546,7 @@ class Yunbase():
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         return df  
     
-    def Metric(self,y_true,y_pred):#for multi_class,labeland proability
+    def Metric(self,y_true:np.array,y_pred=np.array)->float:#for multi_class,labeland proability
         #use cutom_metric when you define.
         if self.custom_metric!=None:
             return self.custom_metric(y_true,y_pred)
@@ -577,7 +582,7 @@ class Yunbase():
                 y_pred=np.clip(y_pred,eps,1-eps)
                 return -np.mean(np.sum(y_true*np.log(y_pred),axis=-1))
     
-    def optuna_lgb(self,X,y,group,kf,metric):
+    def optuna_lgb(self,X:pd.DataFrame,y:pd.DataFrame,group,kf,metric:str)->dict:
         def objective(trial):
             params = {
                 "boosting_type": "gbdt","metric": metric,
@@ -622,7 +627,7 @@ class Yunbase():
         print(f"best_params={best_params}")
         return best_params
 
-    def load_data(self,path_or_file='train.csv',mode='train'):
+    def load_data(self,path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',mode:str='train')->None|pd.DataFrame:
         if mode=='train':
             #read csv,parquet or csv_file
             self.train_path_or_file=path_or_file
@@ -642,12 +647,14 @@ class Yunbase():
             raise ValueError("train_path_or_file is not pd.DataFrame")
         if mode=='train':
             self.train=file.copy()
-        else:
+        elif mode=='test':
             self.test=file.copy()
+        else:#submission.csv
+            return file
     
     # return oof_preds and metric_score
     # can use optuna to find params.If use optuna,then not save models.
-    def cross_validation(self,X,y,group,kf,model,model_name,sample_weight,use_optuna=False):
+    def cross_validation(self,X:pd.DataFrame,y:pd.DataFrame,group,kf,model,model_name,sample_weight,use_optuna):
         log=self.log
         if use_optuna:
             log=10000
@@ -709,7 +716,7 @@ class Yunbase():
             else:
                 oof_preds[valid_index]=model.predict_proba(X_valid)
             if not use_optuna:#not find_params(training)
-                self.pickle_dump(model,f'{model_name}_fold{fold}.model')
+                self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}.model')
                 self.trained_models.append(copy.deepcopy(model))
         if self.exp_mode:#y and oof need expm1.
             #log(y+b)
@@ -718,7 +725,7 @@ class Yunbase():
             metric_score=self.Metric(y.values,oof_preds)
         return oof_preds,metric_score
     
-    def drop_high_correlation_feats(self,df):
+    def drop_high_correlation_feats(self,df:pd.DataFrame)->None:
         #target_col and group_col is for model training,don't delete.object feature is string.
         #Here we choose 0.99,other feature with high correlation can use Dimensionality reduction such as PCA.
         #if you want to delete other feature with high correlation,add into drop_cols when init.
@@ -738,7 +745,7 @@ class Yunbase():
         print(f"drop_cols={drop_cols}")
         self.drop_cols+=drop_cols
     
-    def fit(self,train_path_or_file='train.csv',sample_weight=1):
+    def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',sample_weight=1):
         #lightgbm:https://github.com/microsoft/LightGBM/blob/master/python-package/lightgbm/sklearn.py
         #xgboost:https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/sklearn.py
         self.sample_weight=sample_weight
@@ -922,7 +929,7 @@ class Yunbase():
             if self.save_oof_preds:#if oof_preds is needed
                 np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
         
-    def predict(self,test_path_or_file='test.csv',weights=None):
+    def predict(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)->np.array:
         self.PrintColor("predict......",color=Fore.GREEN)
         #weights:[1]*len(self.models)
         n=len(self.models)
@@ -1030,7 +1037,7 @@ class Yunbase():
             return test_preds
 
     #ensemble some solutions.
-    def ensemble(self,solution_paths_or_files,weights=None):
+    def ensemble(self,solution_paths_or_files:list[str]=[],weights=None):
         #If you don't set weights,then use mean value as result.
         n=len(solution_paths_or_files)
         if weights==None:
@@ -1081,9 +1088,9 @@ class Yunbase():
             return final_solutions
 
     #save test_preds to submission.csv
-    def submit(self,submission_path='submission.csv',test_preds=None,save_name='yunbase'):
+    def submit(self,submission_path_or_file:str|pd.DataFrame='submission.csv',test_preds:np.array=np.ones(3),save_name:str='yunbase'):
         self.PrintColor('submission......',color = Fore.GREEN)
-        submission=pd.read_csv(submission_path)
+        submission=self.load_data(submission_path_or_file,mode='submission')
         submission[self.target_col]=test_preds
         if self.objective!='regression':
             if self.metric!='auc':
