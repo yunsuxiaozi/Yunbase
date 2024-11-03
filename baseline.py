@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/01
+@update_time:2024/11/03
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -12,6 +12,7 @@ import ast#parse Python list strings  transform '[a,b,c]' to [a,b,c]
 #metrics
 from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
 #models(lgb,xgb,cat)
+from sklearn.linear_model import Ridge,LinearRegression,LogisticRegression
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor,CatBoostClassifier
 from xgboost import XGBRegressor,XGBClassifier
@@ -126,8 +127,8 @@ class Yunbase():
                                 'auc','f1_score','mcc',#binary metric
                                 'accuracy','logloss',#multi_class or classification
                                ]
-        #current supported metric
-        self.supported_models=['lgb','cat','xgb']
+        #current supported models
+        self.supported_models=['lgb','cat','xgb','ridge','LinearRegression','LogisticRegression']
         #current supported kfold.
         self.supported_kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold']
         #current supported objective.
@@ -544,6 +545,8 @@ class Yunbase():
                 df[col]=df[col].astype(np.float32)
         #replace inf to nan
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        #xgboost treat -1 as missing value.
+        df.fillna(-1,inplace=True)
         return df  
     
     def Metric(self,y_true:np.array,y_pred=np.array)->float:#for multi_class,labeland proability
@@ -708,7 +711,7 @@ class Yunbase():
             elif 'xgb' in model_name:
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                           sample_weight=sample_weight_train,verbose=log)
-            else:#other models
+            else:#other models such as ridge,LinearRegression
                 model.fit(X_train,y_train) 
 
             if self.objective=='regression':
