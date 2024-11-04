@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/03
+@update_time:2024/11/04
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -123,7 +123,7 @@ class Yunbase():
         
         #currented supported metric
         self.supported_metrics=['custom_metric',#your custom_metric
-                                'mae','rmse','mse','medae','rmsle',#regression
+                                'mae','rmse','mse','medae','rmsle','msle',#regression
                                 'auc','f1_score','mcc',#binary metric
                                 'accuracy','logloss',#multi_class or classification
                                ]
@@ -564,6 +564,8 @@ class Yunbase():
                 return np.mean((y_true-y_pred)**2)
             elif self.metric=='rmsle':
                    return np.sqrt(np.mean((np.log1p(y_pred)-np.log1p(y_true))**2))
+            elif self.metric=='msle':
+                   return np.mean((np.log1p(y_pred)-np.log1p(y_true))**2)
         else:
             if self.metric=='accuracy':
                 y_pred=np.argmax(y_pred,axis=1)#transform probability to label
@@ -585,7 +587,7 @@ class Yunbase():
                 y_pred=np.clip(y_pred,eps,1-eps)
                 return -np.mean(np.sum(y_true*np.log(y_pred),axis=-1))
     
-    def optuna_lgb(self,X:pd.DataFrame,y:pd.DataFrame,group,kf,metric:str)->dict:
+    def optuna_lgb(self,X:pd.DataFrame,y:pd.DataFrame,group,kf_folds:pd.DataFrame,metric:str)->dict:
         def objective(trial):
             params = {
                 "boosting_type": "gbdt","metric": metric,
@@ -609,12 +611,12 @@ class Yunbase():
                 model=LGBMRegressor(**params)
             else:
                 model=LGBMClassifier(**params)   
-            oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,self.sample_weight,use_optuna=True)
+            oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,kf_folds=kf_folds,model=model,model_name=model_name,sample_weight=self.sample_weight,use_optuna=True)
             return metric_score
         #direction is 'minimize' or 'maximize'
         if self.metric in ['accuracy','auc','f1_score','mcc']:
             direction='maximize'
-        elif self.metric in ['medae','mae','rmse','mse','logloss','rmsle']:
+        elif self.metric in ['medae','mae','rmse','mse','logloss','rmsle','msle']:
             direction='minimize'
         else:
             direction=self.optuna_direction
@@ -657,7 +659,7 @@ class Yunbase():
     
     # return oof_preds and metric_score
     # can use optuna to find params.If use optuna,then not save models.
-    def cross_validation(self,X:pd.DataFrame,y:pd.DataFrame,group,kf,model,model_name,sample_weight,use_optuna):
+    def cross_validation(self,X:pd.DataFrame,y:pd.DataFrame,group,kf_folds:pd.DataFrame,model,model_name,sample_weight,use_optuna):
         log=self.log
         if use_optuna:
             log=10000
@@ -665,7 +667,9 @@ class Yunbase():
             oof_preds=np.zeros(len(y))
         else:
             oof_preds=np.zeros((len(y),self.num_classes))
-        for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
+        for fold in range(self.num_folds):
+            train_index=kf_folds[kf_folds['fold']!=fold].index
+            valid_index=kf_folds[kf_folds['fold']==fold].index
             print(f"name:{model_name},fold:{fold}")
 
             X_train, X_valid = X.iloc[train_index].reset_index(drop=True), X.iloc[valid_index].reset_index(drop=True)
@@ -815,6 +819,10 @@ class Yunbase():
             group=None
         #save true label in train data to calculate final score  
         self.target=y.values
+
+        kf_folds=pd.DataFrame({"fold":np.zeros(len(y))})
+        for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
+            kf_folds['fold'][valid_index]=fold
         
         #if you don't use your own models,then use built-in models.
         self.PrintColor("load models")
@@ -828,7 +836,7 @@ class Yunbase():
                 metric='auc'
             elif metric=='medae':
                 metric='mae'
-            elif metric=='rmsle':
+            elif metric in ['rmsle','msle']:
                 metric='mse'
             if self.custom_metric!=None:
                 if self.objective=='regression':
@@ -841,12 +849,12 @@ class Yunbase():
                 metric='auc'
             lgb_params={"boosting_type": "gbdt","metric": metric,
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.1,
-                        "n_estimators": 10000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
+                        "n_estimators": 20000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
                         "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
                         }
             #find new params then use optuna
             if self.use_optuna_find_params:
-                lgb_params=self.optuna_lgb(X,y,group,kf,metric)
+                lgb_params=self.optuna_lgb(X=X,y=y,group=group,kf_folds=kf_folds,metric=metric)
              
             #catboost's metric
             # Valid options are: 'Logloss', 'CrossEntropy', 'CtrFactor', 'Focal', 'RMSE', 'LogCosh', 
@@ -863,21 +871,19 @@ class Yunbase():
             # 'PFound', 'PrecisionAt', 'RecallAt', 'MAP', 'NDCG', 'DCG', 'FilteredDCG', 'MRR', 'ERR', 
             # 'SurvivalAft', 'MultiRMSE', 'MultiRMSEWithMissingValues', 'MultiLogloss', 'MultiCrossEntropy',
             # 'Combination'. 
-            if self.metric=='multi_logloss':
-                metric='Accuracy'
-            elif self.metric=='logloss':
-                metric='Logloss'
-            elif self.metric in ['mse','rmsle']:
-                metric='RMSE'
-            elif self.metric=='accuracy':
-                metric='Accuracy'
-            elif self.metric=='f1_score':
-                metric='F1'
-            elif self.metric in ['auc','rmse','mcc','mae']:
-                metric=metric.upper()
-            elif self.metric=='medae':
-                metric='MAE'
-            if self.custom_metric!=None:#用custom_metric
+
+            #catboost metric to params
+            metric2params={#regression
+                          'mse':'RMSE','rmsle':'RMSE','msle':'MSLE','rmse':'RMSE',
+                           'mae':'MAE','medae':'MAE',
+                          #classification
+                           'accuracy':'Accuracy','logloss':'Logloss','multi_logloss':'Accuracy',
+                           'f1_score':'F1','auc':'AUC','mcc':'MCC',
+                          
+                          }
+            metric=metric2params.get(self.metric,'None')
+            
+            if self.custom_metric!=None:#use your custom_metric
                 if self.objective=='regression':
                     metric='RMSE'
                 elif self.objective=='binary':
@@ -889,7 +895,7 @@ class Yunbase():
                        'random_state':self.seed,
                        'eval_metric'         : metric,
                        'bagging_temperature' : 0.50,
-                       'iterations'          : 10000,
+                       'iterations'          : 20000,
                        'learning_rate'       : 0.1,
                        'max_depth'           : 12,
                        'l2_leaf_reg'         : 1.25,
@@ -897,7 +903,7 @@ class Yunbase():
                        'random_strength'     : 0.25, 
                        'verbose'             : 0,
                       }
-            xgb_params={'random_state': self.seed, 'n_estimators': 10000, 
+            xgb_params={'random_state': self.seed, 'n_estimators': 20000, 
                         'learning_rate': 0.1, 'max_depth': 10,
                         'reg_alpha': 0.08, 'reg_lambda': 0.8, 
                         'subsample': 0.95, 'colsample_bytree': 0.6, 
@@ -927,10 +933,23 @@ class Yunbase():
 
         self.PrintColor("model training")
         for (model,model_name) in self.models:
-            oof_preds,metric_score=self.cross_validation(X,y,group,kf,model,model_name,self.sample_weight,use_optuna=False)
+            oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,kf_folds=kf_folds,model=model,model_name=model_name,sample_weight=self.sample_weight,use_optuna=False)
             print(f"{self.metric}:{metric_score}")
             if self.save_oof_preds:#if oof_preds is needed
                 np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
+
+    def cal_final_score(self,weights):
+        #calculate oof score if save_oof_preds
+        if self.save_oof_preds:
+            oof_preds=np.zeros_like(np.load(f"{self.models[0//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy"))
+            for i in range(0,len(weights),self.num_folds):
+                oof_pred=np.load(f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
+                oof_preds+=weights[i]*oof_pred
+            oof_preds=oof_preds/len(self.models)
+            if self.exp_mode:
+                print(f"final_{self.metric}:{self.Metric( np.expm1( self.target)-self.exp_mode_b,np.expm1( oof_preds)-self.exp_mode_b )}")
+            else:
+                print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
         
     def predict(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)->np.array:
         self.PrintColor("predict......",color=Fore.GREEN)
@@ -947,16 +966,7 @@ class Yunbase():
         weights=weights*(self.num_folds*n)/np.sum(weights)
 
         #calculate oof score if save_oof_preds
-        if self.save_oof_preds:
-            oof_preds=np.zeros_like(np.load(f"{self.models[0//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy"))
-            for i in range(0,len(weights),self.num_folds):
-                oof_pred=np.load(f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
-                oof_preds+=weights[i]*oof_pred
-            oof_preds=oof_preds/n
-            if self.exp_mode:
-                print(f"final_{self.metric}:{self.Metric( np.expm1( self.target)-self.exp_mode_b,np.expm1( oof_preds)-self.exp_mode_b )}")
-            else:
-                print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
+        self.cal_final_score(weights)
         
         self.PrintColor("load test data")
         self.load_data(test_path_or_file,mode='test')
@@ -985,6 +995,8 @@ class Yunbase():
                 self.test[self.target_col]=test_preds
                 self.trained_models=[]
                 self.fit(self.train_path_or_file)
+                #calculate oof score if save_oof_preds
+                self.cal_final_score(weights)
                 
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
                 cnt=0
@@ -1020,6 +1032,8 @@ class Yunbase():
                 self.test[self.target_col]=np.argmax(test_preds,axis=1)
                 self.trained_models=[]
                 self.fit(self.train_path_or_file)
+                #calculate oof score if save_oof_preds
+                self.cal_final_score(weights)
 
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
                 fold=0
