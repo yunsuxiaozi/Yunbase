@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/04
+@update_time:2024/11/05
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -695,7 +695,8 @@ class Yunbase():
                     )
                 if (use_optuna==False) and (self.print_feature_importance):#print feature importance when not use optuna to find params.
                     #here we only care origin features in X.
-                    columns,importances=[self.name2col[x] for x in list(X.columns)],model.feature_importances_[:len(X)]
+                    columns=[self.name2col[x] for x in list(X.columns) if x not in self.word2vec_colnames+self.labelencoder_colnames]
+                    importances=model.feature_importances_[:len(columns)]
                     useless_cols=[]
                     col2importance={}
                     for i in range(len(columns)):
