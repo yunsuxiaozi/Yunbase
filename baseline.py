@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/06
+@update_time:2024/11/07
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -124,8 +124,8 @@ class Yunbase():
         #currented supported metric
         self.supported_metrics=['custom_metric',#your custom_metric
                                 'mae','rmse','mse','medae','rmsle','msle',#regression
-                                'auc','f1_score','mcc',#binary metric
-                                'accuracy','logloss',#multi_class or classification
+                                'auc','logloss','f1_score','mcc',#binary metric
+                                'accuracy','multi_logloss',#multi_class or classification
                                ]
         #current supported models
         self.supported_models=['lgb','cat','xgb','ridge','LinearRegression','LogisticRegression']
@@ -584,12 +584,9 @@ class Yunbase():
             elif self.metric=='mcc':
                 y_pred=np.argmax(y_pred,axis=1)#transform probability to label
                 return matthews_corrcoef(y_true, y_pred)
-            elif self.metric=='logloss':
+            elif self.metric in ['logloss','multi_logloss']:
                 eps=1e-15
-                label=np.zeros_like(y_pred)
-                for i in range(len(label)):
-                    label[i][y_true[i]-1]=1
-                y_true=label
+                y_true=np.eye(self.num_classes)[y_true]
                 y_pred=np.clip(y_pred,eps,1-eps)
                 return -np.mean(np.sum(y_true*np.log(y_pred),axis=-1))
     
@@ -701,7 +698,7 @@ class Yunbase():
                 #gpu params isn't set
                 if self.device in ['cuda','gpu']:#gpu mode when training
                     params=model.get_params()
-                    if (params.get('device',-1)==-1) or (params.get('gpu_use_up',-1)==-1):
+                    if (params.get('device',-1)==-1) or (params.get('gpu_use_dp',-1)==-1):
                          raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                          sample_weight=sample_weight_train,
@@ -784,7 +781,11 @@ class Yunbase():
         self.drop_cols+=drop_cols
     
     def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
-            sample_weight=1,category_cols:list[str]=[]):
+            sample_weight=1,category_cols:list[str]=[],
+            target2idx:dict|None=None,
+           ):
+        #use your custom target2idx  when objective=='binary' or 'multi_class'
+        self.use_custom_target2idx=(type(target2idx)==dict)
         #lightgbm:https://github.com/microsoft/LightGBM/blob/master/python-package/lightgbm/sklearn.py
         #xgboost:https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/sklearn.py
         self.sample_weight=sample_weight
@@ -840,12 +841,18 @@ class Yunbase():
                 
         #classification:target2idx,idx2target
         if self.objective!='regression':
-            self.target2idx={}
-            self.idx2target={}
-            y_unique=sorted(list(y.unique()))
-            for i in range(len(y_unique)):
-                self.target2idx[y_unique[i]]=i
-                self.idx2target[i]=y_unique[i]
+            if self.use_custom_target2idx:#use your custom target2idx
+                self.target2idx=target2idx
+                self.idx2target={}
+                for tgt,idx in self.target2idx.items():
+                    self.idx2target[idx]=tgt
+            else:
+                self.target2idx={}
+                self.idx2target={}
+                y_unique=sorted(list(y.unique()))
+                for idx in range(len(y_unique)):
+                    self.target2idx[y_unique[idx]]=idx
+                    self.idx2target[idx]=y_unique[idx]
             y=y.apply(lambda k:self.target2idx[k])
         
         if self.group_col!=None:
@@ -1102,6 +1109,7 @@ class Yunbase():
             if self.metric=='auc':
                 return test_preds[:,1]
             if self.save_test_preds:
+                print(f"idx2target={self.idx2target}")
                 np.save('test_preds.npy',test_preds)
             test_preds=np.argmax(test_preds,axis=1)
             return test_preds
