@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/07
+@update_time:2024/11/08
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -123,7 +123,7 @@ class Yunbase():
         
         #currented supported metric
         self.supported_metrics=['custom_metric',#your custom_metric
-                                'mae','rmse','mse','medae','rmsle','msle',#regression
+                                'mae','rmse','mse','medae','rmsle','msle','mape',#regression
                                 'auc','logloss','f1_score','mcc',#binary metric
                                 'accuracy','multi_logloss',#multi_class or classification
                                ]
@@ -140,8 +140,6 @@ class Yunbase():
         print(f"Currently supported objectives:{self.supported_objectives}")
         
         self.num_folds=num_folds
-        if self.num_folds<2:#kfold must greater than 1
-            raise ValueError("num_folds must be greater than 1")
         self.seed=seed
         self.models=models
         self.FE=FE
@@ -227,6 +225,8 @@ class Yunbase():
         self.model_save_path="Yunbase_info/"
         if not os.path.exists(self.model_save_path):
             os.mkdir(self.model_save_path)
+
+        self.eps=1e-15#clip (eps,1-eps) | divide by zero.
           
     #print colorful text
     def PrintColor(self,text:str='',color = Fore.BLUE)->None:
@@ -414,7 +414,7 @@ class Yunbase():
             self.one_hot_cols=[]
             self.nunique_2_cols=[]
             for col in df.columns:
-                if col not in [self.target_col,self.group_col]+self.list_cols+self.category_cols:
+                if col not in [self.target_col,self.group_col]+self.list_cols+self.category_cols+self.drop_cols:
                     if (df[col].nunique()<self.one_hot_max) and (df[col].nunique()>2):
                         self.one_hot_cols.append([col,list(df[col].unique())]) 
                     elif df[col].nunique()==2:
@@ -468,7 +468,7 @@ class Yunbase():
                 
                 for gcol in group_cols:
                     df[f'ptp_{gcol}']=df[f'max_{gcol}']-df[f'min_{gcol}']
-                    df[f'mean_{gcol}/std_{gcol}']=df[f'mean_{gcol}']/df[f'std_{gcol}']
+                    df[f'mean_{gcol}/std_{gcol}']=df[f'mean_{gcol}']/(df[f'std_{gcol}']+self.eps)
                 
                 #drop index after using.
                 df.drop(['index'],axis=1,inplace=True)
@@ -491,7 +491,7 @@ class Yunbase():
                     df[self.cross_cols[i]+"+"+self.cross_cols[j]]=df[self.cross_cols[i]]+df[self.cross_cols[j]]
                     df[self.cross_cols[i]+"-"+self.cross_cols[j]]=df[self.cross_cols[i]]-df[self.cross_cols[j]]
                     df[self.cross_cols[i]+"*"+self.cross_cols[j]]=df[self.cross_cols[i]]*df[self.cross_cols[j]]
-                    df[self.cross_cols[i]+"/"+self.cross_cols[j]]=df[self.cross_cols[i]]/(df[self.cross_cols[j]]+1e-10)
+                    df[self.cross_cols[i]+"/"+self.cross_cols[j]]=df[self.cross_cols[i]]/(df[self.cross_cols[j]]+self.eps)
         
         print("< drop useless cols >")
         total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols
@@ -569,9 +569,11 @@ class Yunbase():
             elif self.metric=='mse':
                 return np.mean((y_true-y_pred)**2)
             elif self.metric=='rmsle':
-                   return np.sqrt(np.mean((np.log1p(y_pred)-np.log1p(y_true))**2))
+                return np.sqrt(np.mean((np.log1p(y_pred)-np.log1p(y_true))**2))
             elif self.metric=='msle':
-                   return np.mean((np.log1p(y_pred)-np.log1p(y_true))**2)
+                return np.mean((np.log1p(y_pred)-np.log1p(y_true))**2)
+            elif self.metric=='mape':
+                return np.mean(np.abs(y_pred-y_true)/y_true)
         else:
             if self.metric=='accuracy':
                 y_pred=np.argmax(y_pred,axis=1)#transform probability to label
@@ -585,9 +587,8 @@ class Yunbase():
                 y_pred=np.argmax(y_pred,axis=1)#transform probability to label
                 return matthews_corrcoef(y_true, y_pred)
             elif self.metric in ['logloss','multi_logloss']:
-                eps=1e-15
                 y_true=np.eye(self.num_classes)[y_true]
-                y_pred=np.clip(y_pred,eps,1-eps)
+                y_pred=np.clip(y_pred,self.eps,1-self.eps)
                 return -np.mean(np.sum(y_true*np.log(y_pred),axis=-1))
     
     def optuna_lgb(self,X:pd.DataFrame,y:pd.DataFrame,group,kf_folds:pd.DataFrame,metric:str)->dict:
@@ -619,7 +620,7 @@ class Yunbase():
         #direction is 'minimize' or 'maximize'
         if self.metric in ['accuracy','auc','f1_score','mcc']:
             direction='maximize'
-        elif self.metric in ['medae','mae','rmse','mse','logloss','rmsle','msle']:
+        elif self.metric in ['medae','mape','mae','rmse','mse','logloss','multi_logloss','rmsle','msle']:
             direction='minimize'
         else:
             direction=self.optuna_direction
@@ -659,6 +660,106 @@ class Yunbase():
             self.test=file.copy()
         else:#submission.csv
             return file
+
+    #https://www.kaggle.com/code/marketneutral/purged-time-series-cv-xgboost-optuna
+    def purged_cross_validation(self,train:pd.DataFrame,test:pd.DataFrame,
+                                date_col:str='date',train_gap_each_fold:int=31,#one month
+                                train_test_gap:int=7,#a week
+                                train_date_range:int=0,test_date_range:int=0,
+                               ):
+        if len(self.models)==0:
+            raise ValueError("len(models) can't be 0")
+        self.target_dtype=train[self.target_col].dtype
+        print("< preprocess date_col >")
+        try:#if df[date_col] is string such as '2024-11-08'
+            #transform date to datetime
+            if type(train.dropna()[date_col].values[0])!=pd.Series:
+                train[date_col]=pd.to_datetime(train[date_col])
+            if type(test.dropna()[date_col].values[0])!=pd.Series:
+                test[date_col]=pd.to_datetime(test[date_col])
+            #transform 'date' to days.
+            min_date=train[date_col].min()
+            test[date_col]=(test[date_col]-min_date).dt.days
+            train[date_col]=(train[date_col]-min_date).dt.days
+        except:#df[date_col] is [0,1,2,……,n]
+            min_date=train[date_col].min()
+            test[date_col]=test[date_col]-min_date
+            train[date_col]=train[date_col]-min_date
+
+        if test_date_range==0:#date_range same as test_data
+            test_date_range=test[date_col].max()-test[date_col].min()+1
+        if train_date_range==0:
+           a=train[date_col].max()+1- (self.num_folds-1)*train_gap_each_fold-train_test_gap-test_date_range
+           b=train[date_col].max()+1-self.num_folds*train_gap_each_fold-train_test_gap 
+           train_date_range=min(a,b)
+        #last fold out of index?
+        assert (self.num_folds-1)*train_gap_each_fold+train_date_range+train_test_gap+test_date_range<=train[date_col].max()+1
+        #final train set out of index?
+        assert self.num_folds*train_gap_each_fold+train_date_range+train_test_gap <=train[date_col].max()+1
+
+        if self.use_reduce_memory:
+            train=self.reduce_mem_usage(train, float16_as32=True)
+            test=self.reduce_mem_usage(test,float16_as32=True)
+
+        #use origin columns
+        self.word2vec_colnames=self.word2vec_cols
+        self.labelencoder_colnames=self.labelencoder_cols
+        self.col2name={}
+        self.name2col={}
+        for i in range(len(list(train.columns))):
+            self.col2name[list(train.columns)[i]]=list(train.columns)[i]
+            self.name2col[list(train.columns)[i]]=list(train.columns)[i]
+        
+        self.PrintColor("purged CV")
+        for model,model_name in self.models:
+            CV_score=[]
+            for fold in range(self.num_folds):
+                print(f"fold {fold},model_name:{model_name}")
+                train_date_min=fold*train_gap_each_fold
+                train_date_max=train_date_min+train_date_range
+                test_date_min=train_date_max+train_test_gap
+                test_date_max=test_date_min+test_date_range
+                print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
+                print(f"test_date_min:{test_date_min},test_date_max:{test_date_max}")
+                train_fold=train.copy()[(train[date_col]>=train_date_min)&(train[date_col]<=train_date_max)]
+                valid_fold=train.copy()[(train[date_col]>=test_date_min)&(train[date_col]<=test_date_max)]
+                train_X=train_fold.drop([self.target_col,date_col],axis=1)
+                train_y=train_fold[self.target_col]
+                valid_X=valid_fold.drop([self.target_col,date_col],axis=1)
+                valid_y=valid_fold[self.target_col]
+
+                train_X=self.CV_FE(train_X,mode='train',fold=fold)
+                valid_X=self.CV_FE(valid_X,mode='test',fold=fold)
+                #don't use early_stop,because final_trainset don't have valid_set.
+                model.fit(train_X, train_y)
+                valid_pred=np.zeros(len(valid_X))
+                for idx in range(0,len(valid_X),self.infer_size):
+                    valid_pred[idx:idx+self.infer_size]=model.predict(valid_X[idx:idx+self.infer_size])
+                CV_score.append(self.Metric(valid_y,valid_pred))
+                print(f"{self.metric}:{CV_score[-1]}")
+            self.PrintColor(f"mean_{self.metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
+        
+        self.PrintColor("prediction on test data")
+        train_date_min=train[date_col].max()-train_test_gap-train_date_range
+        train_date_max=train[date_col].max()-train_test_gap
+        print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
+        train=train[(train[date_col]>=train_date_min)&(train[date_col]<=train_date_max)]
+        train_X=train.drop([self.target_col,date_col],axis=1)
+        train_y=train[self.target_col]
+        test_X=test.drop([date_col],axis=1)
+
+        train_X=self.CV_FE(train_X,mode='train',fold=self.num_folds)
+        test_X=self.CV_FE(test_X,mode='test',fold=self.num_folds)
+        
+        test_preds=[]
+        for model,model_name in self.models:
+            model.fit(train_X,train_y)
+            test_pred=np.zeros(len(test_X))
+            for idx in range(0,len(test_X),self.infer_size):
+                test_pred[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size])
+            test_preds.append(test_pred)
+        test_preds=np.mean(test_preds,axis=0)
+        return test_preds
     
     # return oof_preds and metric_score
     # can use optuna to find params.If use optuna,then not save models.
@@ -784,6 +885,8 @@ class Yunbase():
             sample_weight=1,category_cols:list[str]=[],
             target2idx:dict|None=None,
            ):
+        if self.num_folds<2:#kfold must greater than 1
+            raise ValueError("num_folds must be greater than 1")
         #use your custom target2idx  when objective=='binary' or 'multi_class'
         self.use_custom_target2idx=(type(target2idx)==dict)
         #lightgbm:https://github.com/microsoft/LightGBM/blob/master/python-package/lightgbm/sklearn.py
@@ -876,7 +979,7 @@ class Yunbase():
             #lightgbm don't support f1_score,but we will calculate f1_score as Metric.
             if metric in ['f1_score','mcc','logloss']:
                 metric='auc'
-            elif metric=='medae':
+            elif metric in ['medae','mape']:
                 metric='mae'
             elif metric in ['rmsle','msle']:
                 metric='mse'
@@ -899,25 +1002,24 @@ class Yunbase():
                 lgb_params=self.optuna_lgb(X=X,y=y,group=group,kf_folds=kf_folds,metric=metric)
              
             #catboost's metric
-            # Valid options are: 'Logloss', 'CrossEntropy', 'CtrFactor', 'Focal', 'RMSE', 'LogCosh', 
-            # 'Lq', 'MAE', 'Quantile', 'MultiQuantile', 'Expectile', 'LogLinQuantile', 'MAPE', 
+            # Valid options are:  'CrossEntropy', 'CtrFactor', 'Focal', 'RMSE', 'LogCosh', 
+            # 'Lq','Quantile', 'MultiQuantile', 'Expectile', 'LogLinQuantile',
             # 'Poisson', 'MSLE', 'MedianAbsoluteError', 'SMAPE', 'Huber', 'Tweedie', 'Cox', 
             # 'RMSEWithUncertainty', 'MultiClass', 'MultiClassOneVsAll', 'PairLogit', 'PairLogitPairwise',
             # 'YetiRank', 'YetiRankPairwise', 'QueryRMSE', 'GroupQuantile', 'QuerySoftMax', 
             # 'QueryCrossEntropy', 'StochasticFilter', 'LambdaMart', 'StochasticRank', 
             # 'PythonUserDefinedPerObject', 'PythonUserDefinedMultiTarget', 'UserPerObjMetric',
-            # 'UserQuerywiseMetric', 'R2', 'NumErrors', 'FairLoss', 'AUC', 'Accuracy', 'BalancedAccuracy',
-            # 'BalancedErrorRate', 'BrierScore', 'Precision', 'Recall', 'F1', 'TotalF1', 'F', 'MCC', 
+            # 'UserQuerywiseMetric', 'R2', 'NumErrors', 'FairLoss', 'BalancedAccuracy','Combination',
+            # 'BalancedErrorRate', 'BrierScore', 'Precision', 'Recall', 'TotalF1', 'F', 'MCC', 
             # 'ZeroOneLoss', 'HammingLoss', 'HingeLoss', 'Kappa', 'WKappa', 'LogLikelihoodOfPrediction',
             # 'NormalizedGini', 'PRAUC', 'PairAccuracy', 'AverageGain', 'QueryAverage', 'QueryAUC',
             # 'PFound', 'PrecisionAt', 'RecallAt', 'MAP', 'NDCG', 'DCG', 'FilteredDCG', 'MRR', 'ERR', 
             # 'SurvivalAft', 'MultiRMSE', 'MultiRMSEWithMissingValues', 'MultiLogloss', 'MultiCrossEntropy',
-            # 'Combination'. 
 
             #catboost metric to params
             metric2params={#regression
                           'mse':'RMSE','rmsle':'RMSE','msle':'MSLE','rmse':'RMSE',
-                           'mae':'MAE','medae':'MAE',
+                           'mae':'MAE','medae':'MAE','mape':'MAPE',
                           #classification
                            'accuracy':'Accuracy','logloss':'Logloss','multi_logloss':'Accuracy',
                            'f1_score':'F1','auc':'AUC','mcc':'MCC',
@@ -977,16 +1079,17 @@ class Yunbase():
         self.PrintColor("model training")
         for (model,model_name) in self.models:
             oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,kf_folds=kf_folds,model=model,model_name=model_name,sample_weight=self.sample_weight,use_optuna=False)
-            print(f"{self.metric}:{metric_score}")
+            self.PrintColor(f"{self.metric}------------------------------>{metric_score}",color = Fore.RED)
+        
             if self.save_oof_preds:#if oof_preds is needed
-                np.save(f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
+                np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
 
     def cal_final_score(self,weights):
         #calculate oof score if save_oof_preds
         if self.save_oof_preds:
-            oof_preds=np.zeros_like(np.load(f"{self.models[0//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy"))
+            oof_preds=np.zeros_like(np.load(self.model_save_path+f"{self.models[0//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy"))
             for i in range(0,len(weights),self.num_folds):
-                oof_pred=np.load(f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
+                oof_pred=np.load(self.model_save_path+f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
                 oof_preds+=weights[i]*oof_pred
             oof_preds=oof_preds/len(self.models)
             if self.exp_mode:
@@ -1064,7 +1167,7 @@ class Yunbase():
             if self.exp_mode:
                 test_preds=np.expm1(test_preds)-self.exp_mode_b       
             if self.save_test_preds:
-                np.save('test_preds.npy',test_preds)
+                np.save(self.model_save_path+'test_preds.npy',test_preds)
             return test_preds
         else:#classification 
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
@@ -1109,8 +1212,9 @@ class Yunbase():
             if self.metric=='auc':
                 return test_preds[:,1]
             if self.save_test_preds:
-                print(f"idx2target={self.idx2target}")
-                np.save('test_preds.npy',test_preds)
+                self.PrintColor(f"idx2target={self.idx2target}",color=Fore.RED)
+                self.pickle_dump(self.idx2target,self.model_save_path+'idx2target.pkl')
+                np.save(self.model_save_path+'test_preds.npy',test_preds)
             test_preds=np.argmax(test_preds,axis=1)
             return test_preds
 
