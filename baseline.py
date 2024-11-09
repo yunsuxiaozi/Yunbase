@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/08
+@update_time:2024/11/09
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -130,7 +130,7 @@ class Yunbase():
         #current supported models
         self.supported_models=['lgb','cat','xgb','ridge','LinearRegression','LogisticRegression']
         #current supported kfold.
-        self.supported_kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold']
+        self.supported_kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold','purged_CV']
         #current supported objective.
         self.supported_objectives=['binary','multi_class','regression']
         
@@ -148,7 +148,7 @@ class Yunbase():
         self.objective=objective.lower()
         #binary multi_class,regression
         if self.objective not in self.supported_objectives:
-            raise ValueError("Wrong or currently unsupported objective")
+            raise ValueError("Wrong or currently unsupported objective.")
         
         self.custom_metric=custom_metric#function
         if self.custom_metric!=None:
@@ -156,33 +156,33 @@ class Yunbase():
         else:
             self.metric=metric.lower()
         if self.metric not in self.supported_metrics and self.custom_metric==None:
-            raise ValueError("Wrong or currently unsupported metric,You can customize the evaluation metrics using 'custom_metric'")
+            raise ValueError("Wrong or currently unsupported metric,You can customize the evaluation metrics using 'custom_metric'.")
         
         self.nan_margin=nan_margin
         if self.nan_margin<0 or self.nan_margin>1:
-            raise ValueError("nan_margin must be within the range of 0 to 1")
+            raise ValueError("nan_margin must be within the range of 0 to 1.")
         self.group_col=group_col
         self.target_col=target_col
         self.infer_size=infer_size
         if self.infer_size<=0 or type(self.infer_size) is not int:
-            raise ValueError("infer size must be greater than 0 and must be int")  
+            raise ValueError("infer size must be greater than 0 and must be int.")  
         self.save_oof_preds=save_oof_preds
         if self.save_oof_preds not in [True,False]:
-            raise ValueError("save_oof_preds must be True or False")  
+            raise ValueError("save_oof_preds must be True or False.")  
         self.save_test_preds=save_test_preds
         if self.save_test_preds not in [True,False]:
-            raise ValueError("save_test_preds must be True or False")
+            raise ValueError("save_test_preds must be True or False.")
         self.num_classes=num_classes
         self.device=device.lower()
         if (self.objective=='binary') and self.num_classes!=2:
-            raise ValueError("num_classes must be 2")
+            raise ValueError("num_classes must be 2.")
         elif (self.objective=='multi_class') and (self.num_classes==None):
-            raise ValueError("num_classes must be a number(int)")
+            raise ValueError("num_classes must be a number(int).")
         self.one_hot_max=one_hot_max
         self.use_optuna_find_params=use_optuna_find_params
         self.optuna_direction=optuna_direction
         if (self.use_optuna_find_params) and (self.custom_metric!=None) and self.optuna_direction not in ['minimize','maximize']:
-            raise ValueError("optuna_direction must be 'minimize' or 'maximize'")
+            raise ValueError("optuna_direction must be 'minimize' or 'maximize'.")
         self.early_stop=early_stop
         self.test=None#test data will be replaced when call predict function.
         self.use_pseudo_label=use_pseudo_label
@@ -201,12 +201,12 @@ class Yunbase():
         self.log=log
         self.exp_mode=exp_mode
         if self.exp_mode not in [True,False]:
-            raise ValueError("exp_mode must be True or False")  
+            raise ValueError("exp_mode must be True or False.")  
         if (self.objective!='regression') and (self.exp_mode==True):
             raise ValueError("exp_mode must be False in classification task.")
         self.use_reduce_memory=use_reduce_memory
         if self.use_reduce_memory not in [True,False]:
-            raise ValueError("use_reduce_memory must be True or False")  
+            raise ValueError("use_reduce_memory must be True or False.")  
         #when log transform, it is necessary to ensure that the minimum value of the target is greater than 0.
         #so target=target-min_target. b is -min_target.
         self.exp_mode_b=0
@@ -227,6 +227,8 @@ class Yunbase():
             os.mkdir(self.model_save_path)
 
         self.eps=1e-15#clip (eps,1-eps) | divide by zero.
+        self.category_cols=[]
+        self.weight_col='weight'
           
     #print colorful text
     def PrintColor(self,text:str='',color = Fore.BLUE)->None:
@@ -304,7 +306,7 @@ class Yunbase():
         #drop single character,they are meaningless. 'space a space'
         text=re.sub("\s[a-z]\s",'',text)
         #remove number
-        text=re.sub("\d+",'',text)
+        #text=re.sub("\d+",'',text)
         #drop english stopwords,they are meaningless.
         english_stopwords = stopwords.words('english')
         text_list=text.split(" ")
@@ -407,7 +409,7 @@ class Yunbase():
             #missing value 
             self.nan_cols=[col for col in df.columns if df[col].isna().mean()>self.nan_margin]
             #nunique=1
-            self.unique_cols=[col for col in df.drop(self.list_cols,axis=1,errors='ignore').columns if(df[col].nunique()==1)]
+            self.unique_cols=[col for col in df.drop(self.list_cols+[self.weight_col],axis=1,errors='ignore').columns if(df[col].nunique()==1)]
             #object dtype
             self.object_cols=[col for col in df.columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
             #one_hot_cols
@@ -448,7 +450,7 @@ class Yunbase():
                         v=df[col].values[i]
                         if v==v:#find first data isn't nan
                             if not isinstance(v, list):
-                                raise ValueError(f"col '{col}' not a list")
+                                raise ValueError(f"col '{col}' not a list.")
                 
                 #add index,data of list can groupby index.
                 df['index']=np.arange(len(df))
@@ -467,8 +469,8 @@ class Yunbase():
                 df[f'{col}_len']=df[col].apply(len)
                 
                 for gcol in group_cols:
-                    df[f'ptp_{gcol}']=df[f'max_{gcol}']-df[f'min_{gcol}']
-                    df[f'mean_{gcol}/std_{gcol}']=df[f'mean_{gcol}']/(df[f'std_{gcol}']+self.eps)
+                    df[f'{gcol}_ptp']=df[f'{gcol}_max']-df[f'{gcol}_min']
+                    df[f'{gcol}_mean/{gcol}_std']=df[f'{gcol}_mean']/(df[f'{gcol}_std']+self.eps)
                 
                 #drop index after using.
                 df.drop(['index'],axis=1,inplace=True)
@@ -498,7 +500,7 @@ class Yunbase():
         total_drop_cols=[col for col in total_drop_cols if col not in self.word2vec_cols+self.labelencoder_cols]
         df.drop(total_drop_cols,axis=1,inplace=True,errors='ignore')
         if self.use_reduce_memory:
-            df=self.reduce_mem_usage(df, float16_as32=True)
+            df=self.reduce_mem_usage(df,float16_as32=True)
         print("-"*30)
         return df
     
@@ -653,7 +655,7 @@ class Yunbase():
         if isinstance(file, pl.DataFrame):
             file=file.to_pandas()
         if not isinstance(file, pd.DataFrame):
-            raise ValueError("train_path_or_file is not pd.DataFrame")
+            raise ValueError("train_path_or_file is not pd.DataFrame.")
         if mode=='train':
             self.train=file.copy()
         elif mode=='test':
@@ -666,49 +668,71 @@ class Yunbase():
                                 date_col:str='date',train_gap_each_fold:int=31,#one month
                                 train_test_gap:int=7,#a week
                                 train_date_range:int=0,test_date_range:int=0,
+                                category_cols:list[str]=[],
+                                weight_col:str='weight',
                                ):
+        #usually it's a regression task.
+        if self.objective!='regression':
+            raise ValueError("purged CV can only support regression task.")
+        if self.use_pseudo_label:
+            raise ValueError("purged CV can't support use pseudo label.")
+        if self.group_col!=None:
+            raise ValueError("purged CV can't support groupkfold.")
         if len(self.models)==0:
-            raise ValueError("len(models) can't be 0")
-        self.target_dtype=train[self.target_col].dtype
+            raise ValueError("len(models) can't be 0.")
+        if self.save_test_preds:#True
+            raise ValueError("purged CV can't support save test_preds.")
+        if self.print_feature_importance:
+            raise ValueError("purged CV can't support print feature_importance.")
+        if (self.use_optuna_find_params!=0) or (self.optuna_direction!=None):
+            raise ValueError("purged CV can't support optuna find params.")
+        self.train=train
+        self.date_col=date_col
+        self.weight_col=weight_col
+        if self.weight_col not in list(self.train.columns):
+            self.train[self.weight_col]=1
+        
+        self.test=test
+        self.category_cols=category_cols
+        self.target_dtype=self.train[self.target_col].dtype
         print("< preprocess date_col >")
         try:#if df[date_col] is string such as '2024-11-08'
             #transform date to datetime
-            if type(train.dropna()[date_col].values[0])!=pd.Series:
-                train[date_col]=pd.to_datetime(train[date_col])
-            if type(test.dropna()[date_col].values[0])!=pd.Series:
-                test[date_col]=pd.to_datetime(test[date_col])
+            if type(self.train.dropna()[self.date_col].values[0])==str:
+                self.train[self.date_col]=pd.to_datetime(self.train[self.date_col])
+            if type(self.test.dropna()[self.date_col].values[0])==str:
+                self.test[self.date_col]=pd.to_datetime(self.test[self.date_col])
             #transform 'date' to days.
-            min_date=train[date_col].min()
-            test[date_col]=(test[date_col]-min_date).dt.days
-            train[date_col]=(train[date_col]-min_date).dt.days
+            min_date=self.train[self.date_col].min()
+            self.train[self.date_col]=(self.train[self.date_col]-min_date).dt.days
+            self.test[self.date_col]=(self.test[self.date_col]-min_date).dt.days
         except:#df[date_col] is [0,1,2,……,n]
-            min_date=train[date_col].min()
-            test[date_col]=test[date_col]-min_date
-            train[date_col]=train[date_col]-min_date
+            min_date=self.train[self.date_col].min()
+            self.train[self.date_col]=self.train[self.date_col]-min_date
+            self.test[self.date_col]=self.test[self.date_col]-min_date
 
         if test_date_range==0:#date_range same as test_data
-            test_date_range=test[date_col].max()-test[date_col].min()+1
+            test_date_range=self.test[self.date_col].max()-self.test[self.date_col].min()+1
         if train_date_range==0:
-           a=train[date_col].max()+1- (self.num_folds-1)*train_gap_each_fold-train_test_gap-test_date_range
-           b=train[date_col].max()+1-self.num_folds*train_gap_each_fold-train_test_gap 
+           a=self.train[self.date_col].max()+1-(self.num_folds-1)*train_gap_each_fold-train_test_gap-test_date_range
+           b=self.train[self.date_col].max()+1-self.num_folds*train_gap_each_fold-train_test_gap 
            train_date_range=min(a,b)
         #last fold out of index?
-        assert (self.num_folds-1)*train_gap_each_fold+train_date_range+train_test_gap+test_date_range<=train[date_col].max()+1
+        assert (self.num_folds-1)*train_gap_each_fold+train_date_range+train_test_gap+test_date_range<=self.train[self.date_col].max()+1
         #final train set out of index?
-        assert self.num_folds*train_gap_each_fold+train_date_range+train_test_gap <=train[date_col].max()+1
+        assert self.num_folds*train_gap_each_fold+train_date_range+train_test_gap <=self.train[self.date_col].max()+1
 
-        if self.use_reduce_memory:
-            train=self.reduce_mem_usage(train, float16_as32=True)
-            test=self.reduce_mem_usage(test,float16_as32=True)
+        self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
+        self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
 
         #use origin columns
         self.word2vec_colnames=self.word2vec_cols
         self.labelencoder_colnames=self.labelencoder_cols
         self.col2name={}
         self.name2col={}
-        for i in range(len(list(train.columns))):
-            self.col2name[list(train.columns)[i]]=list(train.columns)[i]
-            self.name2col[list(train.columns)[i]]=list(train.columns)[i]
+        for i in range(len(list(self.train.columns))):
+            self.col2name[list(self.train.columns)[i]]=list(self.train.columns)[i]
+            self.name2col[list(self.train.columns)[i]]=list(self.train.columns)[i]
         
         self.PrintColor("purged CV")
         for model,model_name in self.models:
@@ -721,44 +745,100 @@ class Yunbase():
                 test_date_max=test_date_min+test_date_range
                 print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
                 print(f"test_date_min:{test_date_min},test_date_max:{test_date_max}")
-                train_fold=train.copy()[(train[date_col]>=train_date_min)&(train[date_col]<=train_date_max)]
-                valid_fold=train.copy()[(train[date_col]>=test_date_min)&(train[date_col]<=test_date_max)]
-                train_X=train_fold.drop([self.target_col,date_col],axis=1)
+                train_fold=self.train.copy()[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
+                valid_fold=self.train.copy()[(self.train[self.date_col]>=test_date_min)&(self.train[self.date_col]<=test_date_max)]
+                train_X=train_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
+                train_weight=train_fold[self.weight_col]
                 train_y=train_fold[self.target_col]
-                valid_X=valid_fold.drop([self.target_col,date_col],axis=1)
+                valid_X=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
                 valid_y=valid_fold[self.target_col]
 
                 train_X=self.CV_FE(train_X,mode='train',fold=fold)
                 valid_X=self.CV_FE(valid_X,mode='test',fold=fold)
+
+                if self.exp_mode:#use log transform for target_col
+                    self.exp_mode_b=-train_y.min()
+                    train_y=np.log1p(train_y+self.exp_mode_b)
+                
                 #don't use early_stop,because final_trainset don't have valid_set.
-                model.fit(train_X, train_y)
-                valid_pred=np.zeros(len(valid_X))
-                for idx in range(0,len(valid_X),self.infer_size):
-                    valid_pred[idx:idx+self.infer_size]=model.predict(valid_X[idx:idx+self.infer_size])
+                if 'lgb' in model_name:
+                     #gpu params isn't set
+                    if self.device in ['cuda','gpu']:#gpu mode when training
+                        params=model.get_params()
+                        if (params.get('device',-1)==-1) or (params.get('gpu_use_dp',-1)==-1):
+                             raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
+                    model.fit(train_X, train_y,sample_weight=train_weight,
+                              callbacks=[log_evaluation(self.log)])
+                elif 'xgb' in model_name:
+                    #gpu params isn't set
+                    if self.device in ['cuda','gpu']:#gpu mode when training
+                        params=model.get_params()
+                        if (params.get('tree_method',-1)!='gpu_hist'):
+                             raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
+                    model.fit(train_X,train_y,sample_weight=train_weight,
+                              verbose=self.log)
+                elif 'cat' in model_name:
+                    #gpu params isn't set
+                    if self.device in ['cuda','gpu']:#gpu mode when training
+                        params=model.get_params()
+                        if (params.get('task_type',-1)==-1):
+                             raise ValueError("The 'task_type' of catboost must be 'GPU'.")
+                    train_X[self.category_cols]=train_X[self.category_cols].astype('string')
+                    valid_X[self.category_cols]=valid_X[self.category_cols].astype('string')
+                    model.fit(train_X,train_y, sample_weight=train_weight,
+                              cat_features=self.category_cols,
+                              verbose=self.log)
+                else:
+                    model.fit(train_X,train_y)
+                valid_pred=self.predict_batch(model=model,test_X=valid_X)
+                if self.exp_mode:
+                    valid_pred=np.expm1(valid_pred)-self.exp_mode_b
+                if self.save_oof_preds:#if oof_preds is needed
+                    np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",valid_y.values)
+                    np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",valid_pred)
+
                 CV_score.append(self.Metric(valid_y,valid_pred))
                 print(f"{self.metric}:{CV_score[-1]}")
             self.PrintColor(f"mean_{self.metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
         
         self.PrintColor("prediction on test data")
-        train_date_min=train[date_col].max()-train_test_gap-train_date_range
-        train_date_max=train[date_col].max()-train_test_gap
+        train_date_min=self.train[self.date_col].max()-train_test_gap-train_date_range
+        train_date_max=self.train[self.date_col].max()-train_test_gap
         print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
-        train=train[(train[date_col]>=train_date_min)&(train[date_col]<=train_date_max)]
-        train_X=train.drop([self.target_col,date_col],axis=1)
+        train=self.train[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
+        train_weight=train[self.weight_col]
+        train_X=train.drop([self.target_col,self.date_col,self.weight_col],axis=1)
         train_y=train[self.target_col]
-        test_X=test.drop([date_col],axis=1)
+        if self.exp_mode:#use log transform for target_col
+            self.exp_mode_b=-train_y.min()
+            train_y=np.log1p(train_y+self.exp_mode_b)
+        test_X=test.drop([self.date_col],axis=1)
 
         train_X=self.CV_FE(train_X,mode='train',fold=self.num_folds)
         test_X=self.CV_FE(test_X,mode='test',fold=self.num_folds)
         
         test_preds=[]
         for model,model_name in self.models:
-            model.fit(train_X,train_y)
-            test_pred=np.zeros(len(test_X))
-            for idx in range(0,len(test_X),self.infer_size):
-                test_pred[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size])
+            #don't use early_stop,because final_trainset don't have valid_set.
+            if 'lgb' in model_name:
+                model.fit(train_X, train_y,sample_weight=train_weight,
+                          callbacks=[log_evaluation(self.log)])
+            elif 'xgb' in model_name:
+                model.fit(train_X,train_y,sample_weight=train_weight,
+                          verbose=self.log)
+            elif 'cat' in model_name:
+                train_X[self.category_cols]=train_X[self.category_cols].astype('string')
+                valid_X[self.category_cols]=valid_X[self.category_cols].astype('string')
+                model.fit(train_X,train_y, cat_features=self.category_cols,
+                          sample_weight=train_weight,
+                          verbose=self.log)
+            else:
+                model.fit(train_X,train_y)
+            test_pred=self.predict_batch(model=model,test_X=test_X)
             test_preds.append(test_pred)
         test_preds=np.mean(test_preds,axis=0)
+        if self.exp_mode:
+            test_preds=np.expm1(test_preds)-self.exp_mode_b
         return test_preds
     
     # return oof_preds and metric_score
@@ -826,7 +906,7 @@ class Yunbase():
                 if self.device in ['cuda','gpu']:#gpu mode when training
                     params=model.get_params()
                     if (params.get('task_type',-1)==-1):
-                         raise ValueError("The 'task_type' of catboost must be 'GPU'")
+                         raise ValueError("The 'task_type' of catboost must be 'GPU'.")
                 X_train[self.categoryname]=X_train[self.categoryname].astype('string')
                 X_valid[self.categoryname]=X_valid[self.categoryname].astype('string')
                 model.fit(X_train, y_train,
@@ -839,7 +919,7 @@ class Yunbase():
                 if self.device in ['cuda','gpu']:#gpu mode when training
                     params=model.get_params()
                     if (params.get('tree_method',-1)!='gpu_hist'):
-                         raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'")
+                         raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                           sample_weight=sample_weight_train,verbose=log)
             else:#other models such as ridge,LinearRegression
@@ -886,7 +966,7 @@ class Yunbase():
             target2idx:dict|None=None,
            ):
         if self.num_folds<2:#kfold must greater than 1
-            raise ValueError("num_folds must be greater than 1")
+            raise ValueError("num_folds must be greater than 1.")
         #use your custom target2idx  when objective=='binary' or 'multi_class'
         self.use_custom_target2idx=(type(target2idx)==dict)
         #lightgbm:https://github.com/microsoft/LightGBM/blob/master/python-package/lightgbm/sklearn.py
@@ -927,7 +1007,7 @@ class Yunbase():
             self.sample_weight=np.ones(len(y))
             
         if self.sample_weight.shape!=y.values.reshape(-1).shape:
-            raise ValueError(f"shape of sample_weight must be {y.values.reshape(-1).shape}")
+            raise ValueError(f"shape of sample_weight must be {y.values.reshape(-1).shape}.")
         
         #special characters in columns'name will lead to errors when GBDT model training.
         self.col2name={}
@@ -1096,7 +1176,19 @@ class Yunbase():
                 print(f"final_{self.metric}:{self.Metric( np.expm1( self.target)-self.exp_mode_b,np.expm1( oof_preds)-self.exp_mode_b )}")
             else:
                 print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
-        
+
+    def predict_batch(self,model,test_X):
+        test_preds=np.zeros((len(test_X)))
+        for idx in range(0,len(test_X),self.infer_size):
+            test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size])
+        return test_preds
+
+    def predict_proba_batch(self,model,test_X):
+        test_preds=np.zeros((len(test_X),self.num_classes))
+        for idx in range(0,len(test_X),self.infer_size):
+            test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size])
+        return test_preds
+    
     def predict(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)->np.array:
         self.PrintColor("predict......",color=Fore.GREEN)
         #weights:[1]*len(self.models)
@@ -1105,7 +1197,7 @@ class Yunbase():
         if weights==None:
             weights=np.ones(n)
         if len(weights)!=n:
-            raise ValueError(f"length of weights must be {len(self.models)}")
+            raise ValueError(f"length of weights must be {len(self.models)}.")
         self.PrintColor("weight normalization")
         weights=np.array([w for w in weights for f in range(self.num_folds)],dtype=np.float32)
         #normalization
@@ -1127,16 +1219,12 @@ class Yunbase():
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
             cnt=0
             for idx in range(len(self.trained_models)): 
-                model=self.trained_models[idx]
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
-                test_pred=np.zeros(len(self.test))
-                for i in range(0,len(self.test),self.infer_size):
-                    #catboost category columns
-                    try:
-                        test_pred[i:i+self.infer_size]=model.predict(test_copy[i:i+self.infer_size])
-                    except:
-                        test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
-                        test_pred[i:i+self.infer_size]=model.predict(test_copy[i:i+self.infer_size])
+                try:
+                    test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
+                except:
+                    test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
+                    test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
                 test_preds[cnt]=test_pred
                 cnt+=1
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
@@ -1152,15 +1240,12 @@ class Yunbase():
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
                 cnt=0
                 for idx in range(len(self.trained_models)):
-                    model=self.trained_models[idx]
                     test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
-                    test_pred=np.zeros(len(self.test))
-                    for i in range(0,len(self.test),self.infer_size):
-                        try:
-                            test_pred[i:i+self.infer_size]=model.predict(test_copy.drop([self.target_col],axis=1)[i:i+self.infer_size])
-                        except:
-                            test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
-                            test_pred[i:i+self.infer_size]=model.predict(test_copy.drop([self.target_col],axis=1)[i:i+self.infer_size])
+                    try:
+                        test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
+                    except:
+                        test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
+                        test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
                     test_preds[cnt]=test_pred
                     cnt+=1
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
@@ -1173,15 +1258,12 @@ class Yunbase():
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
             cnt=0
             for idx in range(len(self.trained_models)):
-                model=self.trained_models[idx]
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
-                test_pred=np.zeros((len(self.test),self.num_classes))
-                for i in range(0,len(self.test),self.infer_size):
-                    try:
-                        test_pred[i:i+self.infer_size]=model.predict_proba(test_copy[i:i+self.infer_size])
-                    except:
-                        test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
-                        test_pred[i:i+self.infer_size]=model.predict_proba(test_copy[i:i+self.infer_size])
+                try:
+                    test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
+                except:
+                    test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
+                    test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
                 test_preds[cnt]=test_pred
                 cnt+=1   
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
@@ -1197,15 +1279,12 @@ class Yunbase():
                 test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
                 fold=0
                 for idx in range(len(self.trained_models)):
-                    model=self.trained_models[idx]
                     test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
-                    test_pred=np.zeros((len(self.test),self.num_classes))
-                    for i in range(0,len(self.test),self.infer_size):
-                        try:
-                            test_pred[i:i+self.infer_size]=model.predict_proba(test_copy.drop([self.target_col],axis=1)[i:i+self.infer_size])
-                        except:
-                            test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
-                            test_pred[i:i+self.infer_size]=model.predict_proba(test_copy.drop([self.target_col],axis=1)[i:i+self.infer_size])
+                    try:
+                        test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
+                    except:
+                        test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
+                        test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
                     test_preds[fold]=test_pred
                     fold+=1
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
@@ -1225,7 +1304,7 @@ class Yunbase():
         if weights==None:
             weights=np.ones(n)
         if len(weights)!=n:
-            raise ValueError(f"length of weights must be len(solution_paths_or_files)")
+            raise ValueError(f"length of weights must be len(solution_paths_or_files).")
         #normalization
         weights=weights/np.sum(weights)
 
@@ -1239,7 +1318,7 @@ class Yunbase():
                 except:#csv_file
                     solution=solution_paths_or_files[i]
                 if not isinstance(solution, pd.DataFrame):
-                    raise ValueError("solution_paths_or_files is not pd.DataFrame")
+                    raise ValueError("solution_paths_or_files is not pd.DataFrame.")
                 final_solutions.append(weights[i]*solution[self.target_col].values)
             final_solutions=np.sum(final_solutions,axis=0)
             return final_solutions
@@ -1253,7 +1332,7 @@ class Yunbase():
                 except:#csv_file
                     solution=solution_paths_or_files[i]
                 if not isinstance(solution, pd.DataFrame):
-                    raise ValueError("solution_paths_or_files is not pd.DataFrame")
+                    raise ValueError("solution_paths_or_files is not pd.DataFrame.")
                 solutions.append(solution[self.target_col].values)
             final_solutions=[]
             for i in range(len(solutions[0])):
