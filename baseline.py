@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/09
+@update_time:2024/11/10
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -228,7 +228,7 @@ class Yunbase():
 
         self.eps=1e-15#clip (eps,1-eps) | divide by zero.
         self.category_cols=[]
-        self.weight_col='weight'
+        self.weight_col='weight'#weight_col purged_CV
           
     #print colorful text
     def PrintColor(self,text:str='',color = Fore.BLUE)->None:
@@ -315,6 +315,27 @@ class Yunbase():
         #drop space front and end.
         text=text.strip()
         return text
+
+    #3 text readable index 
+    def ARI(self,text):
+        characters=len(text)
+        words=len(re.split(' |\\n|\\.|\\?|\\!|\,',text))
+        sentence=len(re.split('\\.|\\?|\\!',text))
+        ari_score=4.71*(characters/words)+0.5*(words/sentence)-21.43
+        return ari_score
+    def McAlpine_EFLAW(self,text):
+        W=len(re.split(' |\\n|\\.|\\?|\\!|\,',text))
+        S=len(re.split('\\.|\\?|\\!',text))
+        mcalpine_eflaw_score=(W+S*W)/S
+        return mcalpine_eflaw_score
+    def CLRI(self,text):
+        characters=len(text)
+        words=len(re.split(' |\\n|\\.|\\?|\\!|\,',text))#空格,换行符,句号,问号,感叹号,逗号分开.
+        sentence=len(re.split('\\.|\\?|\\!',text))#句号,问号,感叹号分开的句子.
+        L=100*characters/words
+        S=100*sentence/words
+        clri_score=0.0588*L-0.296*S-15.8
+        return clri_score
          
     #basic Feature Engineer,mode='train' or 'test' ,drop_cols is other cols you want to delete.
     def base_FE(self,df:pd.DataFrame,mode:str='train',drop_cols:list[str]=[])->pd.DataFrame:
@@ -335,6 +356,9 @@ class Yunbase():
             for tcol in self.text_cols:  
                 #data processing
                 df[tcol]=(df[tcol].fillna('nan')).apply(lambda x:self.clean_text(x))
+                df[tcol+"_ARI"]=df[tcol].apply(lambda x:self.ARI(x))
+                df[tcol+"_CLRI"]=df[tcol].apply(lambda x:self.CLRI(x))
+                df[tcol+"_McAlpine_EFLAW"]=df[tcol].apply(lambda x:self.McAlpine_EFLAW(x))
                 #split by ps
                 ps='!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
                 for i in range(len(ps)):
@@ -419,25 +443,26 @@ class Yunbase():
                 if col not in [self.target_col,self.group_col]+self.list_cols+self.category_cols+self.drop_cols:
                     if (df[col].nunique()<self.one_hot_max) and (df[col].nunique()>2):
                         self.one_hot_cols.append([col,list(df[col].unique())]) 
-                    elif df[col].nunique()==2:
+                    elif (self.one_hot_max>=2) and (df[col].nunique()==2):
                         self.nunique_2_cols.append([col,list(df[col].unique())[0]])
-        print("< one hot encoder >")          
-        for i in range(len(self.one_hot_cols)):
-            col,nunique=self.one_hot_cols[i]
-            for u in nunique:
-                df[f"{col}_{u}"]=(df[col]==u).astype(np.int8)
-            #one_hot_value_count
-            try:
-                col_valuecounts=self.onehot_valuecounts[col]
-            except:
-                col_valuecounts=df[col].value_counts().to_dict()
-                self.onehot_valuecounts[col]=col_valuecounts
-            df[col+"_valuecounts"]=df[col].apply(lambda x:col_valuecounts.get(x,np.nan))
-            df[col+"_valuecounts"]=df[col+"_valuecounts"].apply(lambda x:np.nan if x<5 else x)
-            
-        for i in range(len(self.nunique_2_cols)):
-            c,u=self.nunique_2_cols[i]
-            df[f"{c}_{u}"]=(df[c]==u).astype(np.int8)
+        if self.one_hot_max>1:
+            print("< one hot encoder >")          
+            for i in range(len(self.one_hot_cols)):
+                col,nunique=self.one_hot_cols[i]
+                for u in nunique:
+                    df[f"{col}_{u}"]=(df[col]==u).astype(np.int8)
+                #one_hot_value_count
+                try:
+                    col_valuecounts=self.onehot_valuecounts[col]
+                except:
+                    col_valuecounts=df[col].value_counts().to_dict()
+                    self.onehot_valuecounts[col]=col_valuecounts
+                df[col+"_valuecounts"]=df[col].apply(lambda x:col_valuecounts.get(x,np.nan))
+                df[col+"_valuecounts"]=df[col+"_valuecounts"].apply(lambda x:np.nan if x<5 else x)
+                
+            for i in range(len(self.nunique_2_cols)):
+                c,u=self.nunique_2_cols[i]
+                df[f"{c}_{u}"]=(df[c]==u).astype(np.int8)
         
         if len(self.list_cols):
             print("< list column's feature >")
@@ -471,6 +496,20 @@ class Yunbase():
                 for gcol in group_cols:
                     df[f'{gcol}_ptp']=df[f'{gcol}_max']-df[f'{gcol}_min']
                     df[f'{gcol}_mean/{gcol}_std']=df[f'{gcol}_mean']/(df[f'{gcol}_std']+self.eps)
+
+                col_list=df[col].values
+                max_k=10
+                res=[]
+                for i in range(len(df)):
+                    #{1:count2,2:count4,3:count1}
+                    vs,cs = np.unique(col_list[i], return_counts=True)
+                    res_=[]
+                    for k in range(max_k):
+                        res_.append(np.sum(cs==k+1))
+                    res.append(res_)
+                res=np.array(res)
+                for k in range(max_k):
+                    df[f"{col}_valuecount_equal{k+1}_cnt"]=res[:,k]
                 
                 #drop index after using.
                 df.drop(['index'],axis=1,inplace=True)
@@ -730,9 +769,10 @@ class Yunbase():
         self.labelencoder_colnames=self.labelencoder_cols
         self.col2name={}
         self.name2col={}
-        for i in range(len(list(self.train.columns))):
-            self.col2name[list(self.train.columns)[i]]=list(self.train.columns)[i]
-            self.name2col[list(self.train.columns)[i]]=list(self.train.columns)[i]
+        train_columns=list(self.train.columns)
+        for i in range(len(train_columns)):
+            self.col2name[train_columns[i]]=train_columns[i]
+            self.name2col[train_columns[i]]=train_columns[i]
         
         self.PrintColor("purged CV")
         for model,model_name in self.models:
@@ -796,8 +836,12 @@ class Yunbase():
                 if self.save_oof_preds:#if oof_preds is needed
                     np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",valid_y.values)
                     np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",valid_pred)
-
+                
                 CV_score.append(self.Metric(valid_y,valid_pred))
+                
+                del train_X,train_y,valid_X,valid_y,valid_pred
+                gc.collect()
+                
                 print(f"{self.metric}:{CV_score[-1]}")
             self.PrintColor(f"mean_{self.metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
         
@@ -874,7 +918,6 @@ class Yunbase():
                 y_train=pd.concat((y_train,test_y),axis=0)
                 sample_weight_train=np.ones(len(X_train))
 
-            
             if 'lgb' in model_name:
                 #gpu params isn't set
                 if self.device in ['cuda','gpu']:#gpu mode when training
@@ -932,6 +975,9 @@ class Yunbase():
             if not use_optuna:#not find_params(training)
                 self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}.model')
                 self.trained_models.append(copy.deepcopy(model))
+            
+            del X_train,y_train,X_valid,y_valid
+            gc.collect()
         if self.exp_mode:#y and oof need expm1.
             #log(y+b)
             metric_score=self.Metric(np.expm1(y.values)-self.exp_mode_b,np.expm1(oof_preds)-self.exp_mode_b )
@@ -1012,12 +1058,13 @@ class Yunbase():
         #special characters in columns'name will lead to errors when GBDT model training.
         self.col2name={}
         self.name2col={}
-        for i in range(len(list(X.columns))):
-            self.col2name[list(X.columns)[i]]=f'col_{i}'
-            self.name2col[f'col_{i}']=list(X.columns)[i]
+        X_columns=list(X.columns)
+        for i in range(len(X_columns)):
+            self.col2name[X_columns[i]]=f'col_{i}'
+            self.name2col[f'col_{i}']=X_columns[i]
         X=X.rename(columns=self.col2name)
         self.categoryname=[self.col2name[col] for col in self.category_cols]
-        print(f"feature_count:{len(list(X.columns))}")
+        print(f"feature_count:{len(X_columns)}")
         
         self.word2vec_colnames=[self.col2name[col] for col in self.word2vec_cols]
         self.labelencoder_colnames=[self.col2name[col] for col in self.labelencoder_cols]
@@ -1242,10 +1289,10 @@ class Yunbase():
                 for idx in range(len(self.trained_models)):
                     test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
                     try:
-                        test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
+                        test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     except:
                         test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
-                        test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
+                        test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     test_preds[cnt]=test_pred
                     cnt+=1
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
@@ -1281,10 +1328,10 @@ class Yunbase():
                 for idx in range(len(self.trained_models)):
                     test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
                     try:
-                        test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
+                        test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     except:
                         test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
-                        test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
+                        test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     test_preds[fold]=test_pred
                     fold+=1
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
