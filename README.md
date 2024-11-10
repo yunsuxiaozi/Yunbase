@@ -38,44 +38,45 @@ from Yunbase.baseline import Yunbase
 All the parameters are below, and you can flexibly choose parameters according to the task.
 
 ```python
-yunbase=Yunbase(num_folds=5,
-                models=[],
-                FE=None,
-                drop_cols=[],
-                seed=2024,
-                objective='regression',
-                metric='mse',
-                nan_margin=0.95,
-                group_col=None,
-                num_classes=None,
-                target_col='target',
-                infer_size=10000,
-                save_oof_preds=True,
-                save_test_preds=True,
-                device='cpu',
-                one_hot_max=50,
-                custom_metric=None,
-                use_optuna_find_params=0,
-                optuna_direction=None,
-                early_stop=100,
-                use_pseudo_label=False,
-                use_high_corr_feat=True,
-                labelencoder_cols=[],
-                list_cols=[],
-                list_gaps=[1],
-                word2vec_models=[],
-                text_cols=[],
-                print_feature_importance=False,
-                log=100,
-                exp_mode=False,
-                use_reduce_memory=False,
+yunbase=Yunbase(num_folds:int=5,
+                      models:list[tuple]=[],
+                      FE=None,
+                      drop_cols:list[str]=[],
+                      seed:int=2024,
+                      objective:str='regression',
+                      metric:str='mse',
+                      nan_margin:float=0.95,
+                      group_col=None,
+                      num_classes=None,
+                      target_col:str='target',
+                      infer_size:int=10000,
+                      save_oof_preds:bool=True,
+                      save_test_preds:bool=True,
+                      device:str='cpu',
+                      one_hot_max:int=50,
+                      custom_metric=None,
+                      use_optuna_find_params:int=0,
+                      optuna_direction=None,
+                      early_stop:int=100,
+                      use_pseudo_label:bool=False,
+                      use_high_corr_feat:bool=True,
+                      cross_cols:list[str]=[],
+                      labelencoder_cols:list[str]=[],
+                      list_cols:list[str]=[],
+                      list_gaps:list[int]=[1],
+                      word2vec_models:list[tuple]=[],
+                      text_cols:list[str]=[],
+                      print_feature_importance:bool=False,
+                      log:int=100,
+                      exp_mode:bool=False,
+                      use_reduce_memory:bool=False,
             )
 ```
 
 - num_folds:<b>int</b>.the number of folds for k-fold cross validation.
 
 - models:<b>list of models</b>.Built in 3 GBDTs as baseline, you can also use custom models,such as models=[(LGBMRegressor(**lgb_params),'lgb')].
-                             
+  
 - FE:<b>function</b>.In addition to the built-in feature engineer, you can also customize feature engineer.For example:
 
      ```python
@@ -113,7 +114,7 @@ yunbase=Yunbase(num_folds=5,
 
 - custom_metric:<b>function</b>.your custom_metric.
 
-     <b>Attention:when objective is multi_class,y_pred in custom(y_true,y_pred) is probability.</b>
+     <b>Attention:when objective is multi_class,y_pred in custom_metric(y_true,y_pred) is probability.</b>
 
 - use_optuna_find_params:<b>int</b>.count of use optuna find best params,0 is not use optuna to find params.Currently only LGBM is supported.
 
@@ -125,6 +126,8 @@ yunbase=Yunbase(num_folds=5,
 
 - use_high_corr_feat:<b>bool</b>.whether to use high correlation features or not. 
 
+- cross_cols:<b>list[str]</b>.Construct features using addition, subtraction, multiplication, and division brute force for these columns of features.
+
 - labelencoder_cols:<b>list</b>.Convert categorical string variables into [1,2,……,n].
 
 - list_cols:<b>list</b>.If the data in a column is a list or str(list), this can be used to extract features.
@@ -132,7 +135,7 @@ yunbase=Yunbase(num_folds=5,
 - list_gaps:<b>list</b>.extract features for list_cols.example=[1,2,4].
 
 - word2vec_models:<b>list</b>.Use models such as tfidf to extract features of string columns.For example:word2vec_models=[(TfidfVectorizer(),col,model_name)].
-                             
+  
 - text_cols:<b>list</b>.extract features of words, sentences, and paragraphs from text here.
 
 - print_feature_importance:<b>bool</b>.after model training,whether print feature importance or not.
@@ -143,36 +146,40 @@ yunbase=Yunbase(num_folds=5,
 
 - use_reduce_memory:<b>bool</b>.if use function reduce_mem_usage(),then set this parameter True.
 
-
 6.yunbase training
 
 At present, it supports read csv, parquet files according to path, or csv files that have already been read.
 
 ```python
-yunbase.fit(train_path_or_file='train.csv',sample_weight=np.ones(len(train)))
+yunbase.fit(train_path_or_file='train.csv',
+            sample_weight=1,category_cols=[],
+            target2idx={}
+           )
 ```
 
 7.yunbase inference
 
 ```python
-test_preds=yunbase.predict(test_path_or_file="test.csv"，weights=[1,1,1],load_path='')
+test_preds=yunbase.predict(test_path_or_file='test.csv',weights=[3,4,3])
 ```
 
-- load_path:If training and inference are conducted in different notebooks, load_path during inference can be done using.
+- weights:This is setting the weights for model ensemble. For example, if you specify lgb, xgb, and cat, you can set weights to [3,4,3].
 
 8.save test_preds to submission.csv
 
 ```python
-yunbase.submit(submission_path='sample_submission.csv',test_preds=test_preds,save_name='yunbase')
+yunbase.submit(submission_path_or_file='submission.csv',test_preds=np.ones(3),save_name='yunbase')
 ```
 
-- save_name can be changed.if you set  'submission',it will give you 'submission.csv'.
+- save_name can be changed.if you set  'submission',it will give you a csv file named 'submission.csv'.
 
 9.ensemble
 
 ```python
 yunbase.ensemble(solution_paths_or_files,weights=None)
 ```
+
+
 
 - For example:
 
@@ -185,19 +192,40 @@ yunbase.ensemble(solution_paths_or_files,weights=None)
   weights=[3,3,4]
   ```
 
-  
 
-10.train data and test data can be seen as below.
+
+10.If train and inference need to be separated.
+
+```
+yunbase.pickle_dump(yunbase,path='yunbase.model')
+
+yunbase1=Yunbase()
+yunbase=yunbase1.pickle_load('yunbase.model')
+```
+
+11.train data and test data can be seen as below.
 
 ```python
 yunbase.train,yunbase.test
 ```
 
+##### <a href="https://www.kaggle.com/code/yunsuxiaozi/yunbase">Here</a> is a static version that can be used to play Kaggle competition.You can refer to this <a href="https://www.kaggle.com/code/yunsuxiaozi/brist1d-yunbase">notebook</a> to learn usage of Yunbase. 
 
+## TimeSeries CV
 
-### <a href="https://www.kaggle.com/code/yunsuxiaozi/yunbase">Here</a> is a static version that can be used to play Kaggle competition.You can refer to this <a href="https://www.kaggle.com/code/yunsuxiaozi/brist1d-yunbase">notebook</a> to learn usage of Yunbase. 
+```python
+yunbase.purged_cross_validation(train=train,test=test, 
+                                date_col='date',
+                                train_gap_each_fold=365,
+                                train_test_gap=31,
+                                train_date_range=0,
+                                test_date_range=0,
+                                category_cols=['warehouse'],
+                                weight_col='weight',
+                           ) 
+```
 
-
+Demo notebook:<a href="https://www.kaggle.com/code/yunsuxiaozi/rohlik-yunbase">Rohlik Yunbase</a>
 
 ### follow-up work
 
@@ -215,12 +243,10 @@ The code has now completed a rough framework and will continue to be improved by
 
 5.In addition to kfold, <b>single model</b> training and inference are also implemented.
 
-6.In addition to GBDT, <b>other model</b>  such as LinearRegression training and inference are also implemented.
-
-7.hill climbing to find <b>blending</b> weight.
+6.hill climbing to find <b>blending</b> weight.
 
 Waiting for updates.
 
 Kaggle:https://www.kaggle.com/yunsuxiaozi
 
- update time:2024/10/28(baseline.py and README may not synchronize updates)
+ update time:2024/11/10(baseline.py and README may not synchronize updates)
