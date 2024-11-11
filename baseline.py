@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/10
+@update_time:2024/11/11
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -11,11 +11,14 @@ from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,G
 import ast#parse Python list strings  transform '[a,b,c]' to [a,b,c]
 #metrics
 from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
-#models(lgb,xgb,cat)
+
+#models(lgb,xgb,cat,ridge,lr,tabnet)
 from sklearn.linear_model import Ridge,LinearRegression,LogisticRegression
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor,CatBoostClassifier
 from xgboost import XGBRegressor,XGBClassifier
+from pytorch_tabnet.tab_model import TabNetRegressor,TabNetClassifier
+
 import copy#copy object
 import gc#rubbish collection
 import dill#serialize and deserialize objects (such as saving and loading tree models)
@@ -76,6 +79,7 @@ class Yunbase():
                       log:int=100,
                       exp_mode:bool=False,
                       use_reduce_memory:bool=False,
+                      AGGREGATIONS:list[str]=['nunique','count','min','max','first','last', 'mean','median','sum','std','skew'],#kurtosis
                 )->None:
         """
         num_folds             :the number of folds for k-fold cross validation.
@@ -128,7 +132,7 @@ class Yunbase():
                                 'accuracy','multi_logloss',#multi_class or classification
                                ]
         #current supported models
-        self.supported_models=['lgb','cat','xgb','ridge','LinearRegression','LogisticRegression']
+        self.supported_models=['lgb','cat','xgb','ridge','LinearRegression','LogisticRegression','tabnet']
         #current supported kfold.
         self.supported_kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold','purged_CV']
         #current supported objective.
@@ -212,7 +216,7 @@ class Yunbase():
         self.exp_mode_b=0
         
         #common AGGREGATIONS
-        self.AGGREGATIONS = ['nunique','count','min','max','first','last', 'mean','median','sum','std','skew']#kurtosis
+        self.AGGREGATIONS = AGGREGATIONS
         self.sample_weight=1
         
         #If inference one batch of data at a time requires repeatedly loading the model,
@@ -345,7 +349,9 @@ class Yunbase():
         #category columns
         for col in self.category_cols:
             #preprocessing
-            df[col]=df[col].apply(lambda x:str(x).lower()).astype('category')
+            df[col]=df[col].apply(lambda x:str(x).lower())
+            df=self.label_encoder(df,label_encoder_cols=[col],fold=self.num_folds)
+            df[col]=df[col].astype('category')
         
         #text feature extract,such as word,sentence,paragraph.
         #The reason why it needs to be done earlier is that it will generate columns such as nunique=1 or
@@ -433,9 +439,9 @@ class Yunbase():
             #missing value 
             self.nan_cols=[col for col in df.columns if df[col].isna().mean()>self.nan_margin]
             #nunique=1
-            self.unique_cols=[col for col in df.drop(self.list_cols+[self.weight_col],axis=1,errors='ignore').columns if(df[col].nunique()==1)]
+            self.unique_cols=[col for col in df.drop(self.drop_cols+self.list_cols+[self.weight_col],axis=1,errors='ignore').columns if(df[col].nunique()==1)]
             #object dtype
-            self.object_cols=[col for col in df.columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
+            self.object_cols=[col for col in df.drop(self.drop_cols+self.category_cols,axis=1).columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
             #one_hot_cols
             self.one_hot_cols=[]
             self.nunique_2_cols=[]
@@ -542,31 +548,37 @@ class Yunbase():
             df=self.reduce_mem_usage(df,float16_as32=True)
         print("-"*30)
         return df
+
+    def label_encoder(self,df,label_encoder_cols,fold):
+        for col in label_encoder_cols:
+            try:
+                self.PrintColor(f"-> for column {self.name2col[col]} labelencoder feature",color=Fore.RED)
+            except:
+                self.PrintColor(f"-> for column {col} labelencoder feature",color=Fore.RED)
+            #load model when model is existed,fit when model isn't exist.
+            try:
+                le=self.trained_le[f'le_{col}_fold{fold}.model']
+            except:#training
+                value=df[col].value_counts().to_dict()
+                
+                # new_value={}
+                # for k,v in value.items():
+                #     new_value[k]=v
+                # value=new_value
+                le={}
+                for k,v in value.items():
+                    le[k]=len(le)
+                self.pickle_dump(le,self.model_save_path+f'le_{col}_fold{fold}.model')
+                self.trained_le[f'le_{col}_fold{fold}.model']=copy.deepcopy(le)
+            df[col] = df[col].apply(lambda x:le.get(x,0))
+        return df
     
     #Feature engineering that needs to be done internally in cross validation.
     def CV_FE(self,df:pd.DataFrame,mode:str='train',fold:int=0)->pd.DataFrame:
         #labelencoder
         if len(self.labelencoder_colnames):
             print("< label encoder >")
-            for col in self.labelencoder_colnames:
-                self.PrintColor(f"-> for column {self.name2col[col]} labelencoder feature",color=Fore.RED)
-                #load model when model is existed,fit when model isn't exist.
-                try:
-                    le=self.trained_le[f'le_{col}_fold{fold}.model']
-                except:#training
-                    value=df[col].value_counts().to_dict()
-                    new_value={}
-                    for k,v in value.items():
-                        if v<10:
-                            new_value[k]=v
-                    value=new_value
-                    le={}
-                    for v in value:
-                        if v in le.keys():
-                            le[v]=len(le)
-                    self.pickle_dump(le,self.model_save_path+f'le_{col}_fold{fold}.model')
-                    self.trained_le[f'le_{col}_fold{fold}.model']=copy.deepcopy(le)
-                df[col+"_le"] = df[col].apply(lambda x:le.get(x,-1))
+            df=self.label_encoder(df,label_encoder_cols=self.labelencoder_colnames,fold=fold)
 
         if len(self.word2vec_models):
             print("< word2vec >")
@@ -965,15 +977,50 @@ class Yunbase():
                          raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                           sample_weight=sample_weight_train,verbose=log)
+            elif 'tabnet' in model_name:
+                 cat_idxs,cat_dims=[],[]
+                 X_train_columns=list(X_train.columns)
+                 for idx in range(len(X_train_columns)):
+                     if X_train[X_train_columns[idx]].dtype=='category':
+                         cat_idxs.append(idx)
+                         cat_dims.append(X[X_train_columns[idx]].nunique())
+                         X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
+                         X_valid[X_train_columns[idx]]=X_valid[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
+                 params=model.get_params()
+                 params['cat_idxs']=cat_idxs
+                 params['cat_dims']=cat_dims
+                 params['cat_emb_dim']=[5]*len(cat_idxs)
+                 if self.objective=='regression':
+                     model=TabNetRegressor(**params)
+                     model.fit(
+                        X_train.to_numpy(), y_train.to_numpy().reshape(-1,1),
+                        eval_metric=['rmse'],
+                        eval_set=[(X_valid.to_numpy(), y_valid.to_numpy().reshape(-1,1) ) ],
+                        batch_size=1024,
+                    )
+                 else:
+                     model=TabNetClassifier(**params)
+                     model.fit(
+                        X_train.to_numpy(), y_train.to_numpy(),
+                        eval_set=[(X_valid.to_numpy(), y_valid.to_numpy())],
+                        batch_size=1024,
+                    )
             else:#other models such as ridge,LinearRegression
                 model.fit(X_train,y_train) 
 
             if self.objective=='regression':
-                oof_preds[valid_index]=model.predict(X_valid)
+                try:
+                    oof_preds[valid_index]=model.predict(X_valid)
+                except:#NN such as tabnet
+                    oof_preds[valid_index]=model.predict(X_valid.to_numpy()).reshape(-1)
             else:
-                oof_preds[valid_index]=model.predict_proba(X_valid)
+                try:
+                    oof_preds[valid_index]=model.predict_proba(X_valid)
+                except:#NN such as tabnet
+                    oof_preds[valid_index]=model.predict_proba(X_valid.to_numpy())
             if not use_optuna:#not find_params(training)
-                self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}.model')
+                if 'tabnet' not in model_name:
+                    self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}.model')
                 self.trained_models.append(copy.deepcopy(model))
             
             del X_train,y_train,X_valid,y_valid
@@ -1226,14 +1273,26 @@ class Yunbase():
 
     def predict_batch(self,model,test_X):
         test_preds=np.zeros((len(test_X)))
+        cat_cols=[col for col in test_X.columns if str(test_X[col].dtype) in ['category','object','string']]
         for idx in range(0,len(test_X),self.infer_size):
-            test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size])
+            try:
+               test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size])
+            except:#NN such as tabnet 
+               for c in cat_cols:
+                   test_X[c]=test_X[c].apply(lambda x:int(x)).astype(np.int32)     
+               test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
         return test_preds
 
     def predict_proba_batch(self,model,test_X):
         test_preds=np.zeros((len(test_X),self.num_classes))
+        cat_cols=[col for col in test_X.columns if str(test_X[col].dtype) in ['category','object','string']]
         for idx in range(0,len(test_X),self.infer_size):
-            test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size])
+            try:
+                test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size])
+            except:#NN such as tabnet
+                for c in cat_cols:
+                    test_X[c]=test_X[c].apply(lambda x:int(x)).astype(np.int32)     
+                test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size].to_numpy())
         return test_preds
     
     def predict(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)->np.array:
