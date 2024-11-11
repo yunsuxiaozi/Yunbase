@@ -761,6 +761,27 @@ class Yunbase():
             min_date=self.train[self.date_col].min()
             self.train[self.date_col]=self.train[self.date_col]-min_date
             self.test[self.date_col]=self.test[self.date_col]-min_date
+        print("< date col FE >")
+        self.train['day']=self.train[self.date_col]%365
+        self.train['dayofweek']=self.train[self.date_col]%7
+        self.train['month']=self.train[self.date_col]%31
+        self.train['sin_dayofweek']=np.sin(2*np.pi*self.train['dayofweek']/7)
+        self.train['cos_dayofweek']=np.cos(2*np.pi*self.train['dayofweek']/7)
+        self.train['sin_day']=np.sin(2*np.pi*self.train['day']/365)
+        self.train['cos_day']=np.cos(2*np.pi*self.train['day']/365)
+        self.train['sin_month']=np.sin(2*np.pi*self.train['month']/31)
+        self.train['cos_month']=np.cos(2*np.pi*self.train['month']/31)
+
+        self.test['day']=self.test[self.date_col]%365
+        self.test['dayofweek']=self.test[self.date_col]%7
+        self.test['month']=self.test[self.date_col]%31
+        self.test['sin_dayofweek']=np.sin(2*np.pi*self.test['dayofweek']/7)
+        self.test['cos_dayofweek']=np.cos(2*np.pi*self.test['dayofweek']/7)
+        self.test['sin_day']=np.sin(2*np.pi*self.test['day']/365)
+        self.test['cos_day']=np.cos(2*np.pi*self.test['day']/365)
+        self.test['sin_month']=np.sin(2*np.pi*self.test['month']/31)
+        self.test['cos_month']=np.cos(2*np.pi*self.test['month']/31)
+        
 
         if test_date_range==0:#date_range same as test_data
             test_date_range=self.test[self.date_col].max()-self.test[self.date_col].min()+1
@@ -799,18 +820,18 @@ class Yunbase():
                 print(f"test_date_min:{test_date_min},test_date_max:{test_date_max}")
                 train_fold=self.train.copy()[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
                 valid_fold=self.train.copy()[(self.train[self.date_col]>=test_date_min)&(self.train[self.date_col]<=test_date_max)]
-                train_X=train_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
+                X_train=train_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
                 train_weight=train_fold[self.weight_col]
-                train_y=train_fold[self.target_col]
-                valid_X=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
-                valid_y=valid_fold[self.target_col]
+                y_train=train_fold[self.target_col]
+                X_valid=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
+                y_valid=valid_fold[self.target_col]
 
-                train_X=self.CV_FE(train_X,mode='train',fold=fold)
-                valid_X=self.CV_FE(valid_X,mode='test',fold=fold)
+                X_train=self.CV_FE(X_train,mode='train',fold=fold)
+                X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
 
                 if self.exp_mode:#use log transform for target_col
-                    self.exp_mode_b=-train_y.min()
-                    train_y=np.log1p(train_y+self.exp_mode_b)
+                    self.exp_mode_b=-y_train.min()
+                    y_train=np.log1p(y_train+self.exp_mode_b)
                 
                 #don't use early_stop,because final_trainset don't have valid_set.
                 if 'lgb' in model_name:
@@ -819,7 +840,7 @@ class Yunbase():
                         params=model.get_params()
                         if (params.get('device',-1)==-1) or (params.get('gpu_use_dp',-1)==-1):
                              raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
-                    model.fit(train_X, train_y,sample_weight=train_weight,
+                    model.fit(X_train, y_train,sample_weight=train_weight,
                               callbacks=[log_evaluation(self.log)])
                 elif 'xgb' in model_name:
                     #gpu params isn't set
@@ -827,7 +848,7 @@ class Yunbase():
                         params=model.get_params()
                         if (params.get('tree_method',-1)!='gpu_hist'):
                              raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
-                    model.fit(train_X,train_y,sample_weight=train_weight,
+                    model.fit(X_train,y_train,sample_weight=train_weight,
                               verbose=self.log)
                 elif 'cat' in model_name:
                     #gpu params isn't set
@@ -835,23 +856,40 @@ class Yunbase():
                         params=model.get_params()
                         if (params.get('task_type',-1)==-1):
                              raise ValueError("The 'task_type' of catboost must be 'GPU'.")
-                    train_X[self.category_cols]=train_X[self.category_cols].astype('string')
-                    valid_X[self.category_cols]=valid_X[self.category_cols].astype('string')
-                    model.fit(train_X,train_y, sample_weight=train_weight,
+                    X_train[self.category_cols]=X_train[self.category_cols].astype('string')
+                    X_valid[self.category_cols]=X_valid[self.category_cols].astype('string')
+                    model.fit(X_train,y_train, sample_weight=train_weight,
                               cat_features=self.category_cols,
                               verbose=self.log)
+                elif 'tabnet' in model_name:
+                    cat_idxs,cat_dims=[],[]
+                    X_train_columns=list(X_train.columns)
+                    for idx in range(len(X_train_columns)):
+                        if X_train[X_train_columns[idx]].dtype=='category':
+                            cat_idxs.append(idx)
+                            cat_dims.append(train[X_train_columns[idx]].nunique())
+                            X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)          
+                    params=model.get_params()
+                    params['cat_idxs']=cat_idxs
+                    params['cat_dims']=cat_dims
+                    params['cat_emb_dim']=[5]*len(cat_idxs)
+                    model=TabNetRegressor(**params)
+                    model.fit(
+                            X_train.to_numpy(), y_train.to_numpy().reshape(-1,1),
+                            batch_size=1024,
+                        )
                 else:
-                    model.fit(train_X,train_y)
-                valid_pred=self.predict_batch(model=model,test_X=valid_X)
+                    model.fit(X_train,y_train)
+                valid_pred=self.predict_batch(model=model,test_X=X_valid)
                 if self.exp_mode:
                     valid_pred=np.expm1(valid_pred)-self.exp_mode_b
                 if self.save_oof_preds:#if oof_preds is needed
-                    np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",valid_y.values)
+                    np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",y_valid.values)
                     np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",valid_pred)
                 
-                CV_score.append(self.Metric(valid_y,valid_pred))
+                CV_score.append(self.Metric(y_valid,valid_pred))
                 
-                del train_X,train_y,valid_X,valid_y,valid_pred
+                del X_train,y_train,X_valid,y_valid,valid_pred
                 gc.collect()
                 
                 print(f"{self.metric}:{CV_score[-1]}")
@@ -863,33 +901,50 @@ class Yunbase():
         print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
         train=self.train[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
         train_weight=train[self.weight_col]
-        train_X=train.drop([self.target_col,self.date_col,self.weight_col],axis=1)
-        train_y=train[self.target_col]
+        X_train=train.drop([self.target_col,self.date_col,self.weight_col],axis=1)
+        y_train=train[self.target_col]
         if self.exp_mode:#use log transform for target_col
-            self.exp_mode_b=-train_y.min()
-            train_y=np.log1p(train_y+self.exp_mode_b)
+            self.exp_mode_b=-y_train.min()
+            y_train=np.log1p(y_train+self.exp_mode_b)
         test_X=test.drop([self.date_col],axis=1)
 
-        train_X=self.CV_FE(train_X,mode='train',fold=self.num_folds)
+        X_train=self.CV_FE(X_train,mode='train',fold=self.num_folds)
         test_X=self.CV_FE(test_X,mode='test',fold=self.num_folds)
         
         test_preds=[]
         for model,model_name in self.models:
             #don't use early_stop,because final_trainset don't have valid_set.
             if 'lgb' in model_name:
-                model.fit(train_X, train_y,sample_weight=train_weight,
+                model.fit(X_train, y_train,sample_weight=train_weight,
                           callbacks=[log_evaluation(self.log)])
             elif 'xgb' in model_name:
-                model.fit(train_X,train_y,sample_weight=train_weight,
+                model.fit(X_train,y_train,sample_weight=train_weight,
                           verbose=self.log)
             elif 'cat' in model_name:
-                train_X[self.category_cols]=train_X[self.category_cols].astype('string')
-                valid_X[self.category_cols]=valid_X[self.category_cols].astype('string')
-                model.fit(train_X,train_y, cat_features=self.category_cols,
+                X_train[self.category_cols]=X_train[self.category_cols].astype('string')
+                model.fit(X_train,y_train, cat_features=self.category_cols,
                           sample_weight=train_weight,
                           verbose=self.log)
+            elif 'tabnet' in model_name:
+                cat_idxs,cat_dims=[],[]
+                X_train_columns=list(X_train.columns)
+                for idx in range(len(X_train_columns)):
+                    if X_train[X_train_columns[idx]].dtype=='category':
+                        cat_idxs.append(idx)
+                        cat_dims.append(train[X_train_columns[idx]].nunique())
+                        X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
+                         
+                params=model.get_params()
+                params['cat_idxs']=cat_idxs
+                params['cat_dims']=cat_dims
+                params['cat_emb_dim']=[5]*len(cat_idxs)
+                model=TabNetRegressor(**params)
+                model.fit(
+                    X_train.to_numpy(), y_train.to_numpy().reshape(-1,1),
+                    batch_size=1024,
+                )
             else:
-                model.fit(train_X,train_y)
+                model.fit(X_train,y_train)
             test_pred=self.predict_batch(model=model,test_X=test_X)
             test_preds.append(test_pred)
         test_preds=np.mean(test_preds,axis=0)
@@ -983,7 +1038,7 @@ class Yunbase():
                  for idx in range(len(X_train_columns)):
                      if X_train[X_train_columns[idx]].dtype=='category':
                          cat_idxs.append(idx)
-                         cat_dims.append(X[X_train_columns[idx]].nunique())
+                         cat_dims.append(train[X_train_columns[idx]].nunique())
                          X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
                          X_valid[X_train_columns[idx]]=X_valid[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
                  params=model.get_params()
