@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/11
+@update_time:2024/11/12
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -127,7 +127,7 @@ class Yunbase():
         
         #currented supported metric
         self.supported_metrics=['custom_metric',#your custom_metric
-                                'mae','rmse','mse','medae','rmsle','msle','mape',#regression
+                                'mae','rmse','mse','medae','rmsle','msle','mape','r2',#regression
                                 'auc','logloss','f1_score','mcc',#binary metric
                                 'accuracy','multi_logloss',#multi_class or classification
                                ]
@@ -183,8 +183,17 @@ class Yunbase():
         elif (self.objective=='multi_class') and (self.num_classes==None):
             raise ValueError("num_classes must be a number(int).")
         self.one_hot_max=one_hot_max
+        
         self.use_optuna_find_params=use_optuna_find_params
         self.optuna_direction=optuna_direction
+        self.direction2metric={
+            'maximize':['accuracy','auc','f1_score','mcc',#classification
+                        'r2'#regression
+                       ],
+            'minimize':['medae','mape','mae','rmse','mse','rmsle','msle',#regression
+                        'logloss','multi_logloss'#classification
+                       ]
+        }
         if (self.use_optuna_find_params) and (self.custom_metric!=None) and self.optuna_direction not in ['minimize','maximize']:
             raise ValueError("optuna_direction must be 'minimize' or 'maximize'.")
         self.early_stop=early_stop
@@ -441,7 +450,7 @@ class Yunbase():
             #nunique=1
             self.unique_cols=[col for col in df.drop(self.drop_cols+self.list_cols+[self.weight_col],axis=1,errors='ignore').columns if(df[col].nunique()==1)]
             #object dtype
-            self.object_cols=[col for col in df.drop(self.drop_cols+self.category_cols,axis=1).columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
+            self.object_cols=[col for col in df.drop(self.drop_cols+self.category_cols,axis=1,errors='ignore').columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
             #one_hot_cols
             self.one_hot_cols=[]
             self.nunique_2_cols=[]
@@ -627,6 +636,8 @@ class Yunbase():
                 return np.mean((np.log1p(y_pred)-np.log1p(y_true))**2)
             elif self.metric=='mape':
                 return np.mean(np.abs(y_pred-y_true)/y_true)
+            elif self.metric=='r2':
+                return 1-np.sum ((y_true-y_pred)**2)/np.sum ((y_true-np.mean(y_true))**2)
         else:
             if self.metric=='accuracy':
                 y_pred=np.argmax(y_pred,axis=1)#transform probability to label
@@ -670,13 +681,12 @@ class Yunbase():
                 model=LGBMClassifier(**params)   
             oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,kf_folds=kf_folds,model=model,model_name=model_name,sample_weight=self.sample_weight,use_optuna=True)
             return metric_score
+        
         #direction is 'minimize' or 'maximize'
-        if self.metric in ['accuracy','auc','f1_score','mcc']:
-            direction='maximize'
-        elif self.metric in ['medae','mape','mae','rmse','mse','logloss','multi_logloss','rmsle','msle']:
-            direction='minimize'
-        else:
-            direction=self.optuna_direction
+        direction=self.optuna_direction
+        for key in self.direction2metric.keys():
+            if self.metric in self.direction2metric[key]:
+                direction=key
             
         study = optuna.create_study(direction=direction, study_name='find best lgb_params') 
         study.optimize(objective, n_trials=self.use_optuna_find_params)
@@ -1038,7 +1048,7 @@ class Yunbase():
                  for idx in range(len(X_train_columns)):
                      if X_train[X_train_columns[idx]].dtype=='category':
                          cat_idxs.append(idx)
-                         cat_dims.append(train[X_train_columns[idx]].nunique())
+                         cat_dims.append(X[X_train_columns[idx]].nunique())
                          X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
                          X_valid[X_train_columns[idx]]=X_valid[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
                  params=model.get_params()
@@ -1181,7 +1191,7 @@ class Yunbase():
             else:
                 self.target2idx={}
                 self.idx2target={}
-                y_unique=sorted(list(y.unique()))
+                y_unique=list(y.value_counts().to_dict().keys())
                 for idx in range(len(y_unique)):
                     self.target2idx[y_unique[idx]]=idx
                     self.idx2target[idx]=y_unique[idx]
@@ -1210,7 +1220,7 @@ class Yunbase():
                 metric='auc'
             elif metric in ['medae','mape']:
                 metric='mae'
-            elif metric in ['rmsle','msle']:
+            elif metric in ['rmsle','msle','r2']:
                 metric='mse'
             if self.custom_metric!=None:
                 if self.objective=='regression':
@@ -1238,7 +1248,7 @@ class Yunbase():
             # 'YetiRank', 'YetiRankPairwise', 'QueryRMSE', 'GroupQuantile', 'QuerySoftMax', 
             # 'QueryCrossEntropy', 'StochasticFilter', 'LambdaMart', 'StochasticRank', 
             # 'PythonUserDefinedPerObject', 'PythonUserDefinedMultiTarget', 'UserPerObjMetric',
-            # 'UserQuerywiseMetric', 'R2', 'NumErrors', 'FairLoss', 'BalancedAccuracy','Combination',
+            # 'UserQuerywiseMetric','NumErrors', 'FairLoss', 'BalancedAccuracy','Combination',
             # 'BalancedErrorRate', 'BrierScore', 'Precision', 'Recall', 'TotalF1', 'F', 'MCC', 
             # 'ZeroOneLoss', 'HammingLoss', 'HingeLoss', 'Kappa', 'WKappa', 'LogLikelihoodOfPrediction',
             # 'NormalizedGini', 'PRAUC', 'PairAccuracy', 'AverageGain', 'QueryAverage', 'QueryAUC',
@@ -1248,7 +1258,7 @@ class Yunbase():
             #catboost metric to params
             metric2params={#regression
                           'mse':'RMSE','rmsle':'RMSE','msle':'MSLE','rmse':'RMSE',
-                           'mae':'MAE','medae':'MAE','mape':'MAPE',
+                           'mae':'MAE','medae':'MAE','mape':'MAPE','r2':'R2',
                           #classification
                            'accuracy':'Accuracy','logloss':'Logloss','multi_logloss':'Accuracy',
                            'f1_score':'F1','auc':'AUC','mcc':'MCC',
