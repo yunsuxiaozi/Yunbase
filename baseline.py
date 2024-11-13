@@ -1,30 +1,33 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/12
+@update_time:2024/11/13
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
 import numpy as np#for scientific computation of matrices
+from scipy.stats import kurtosis#calculate kurt
+#powerful plot libraries
+import matplotlib.pyplot as plt
+import seaborn as sns
+
 #current supported kfold
 from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,GroupKFold
-import ast#parse Python list strings  transform '[a,b,c]' to [a,b,c]
 #metrics
 from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
-
 #models(lgb,xgb,cat,ridge,lr,tabnet)
 from sklearn.linear_model import Ridge,LinearRegression,LogisticRegression
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor,CatBoostClassifier
 from xgboost import XGBRegressor,XGBClassifier
 from pytorch_tabnet.tab_model import TabNetRegressor,TabNetClassifier
+import optuna#automatic hyperparameter optimization framework
 
+import ast#parse Python list strings  transform '[a,b,c]' to [a,b,c]
 import copy#copy object
 import gc#rubbish collection
 import dill#serialize and deserialize objects (such as saving and loading tree models)
-import optuna#automatic hyperparameter optimization framework
 from colorama import Fore, Style #print colorful text
-from scipy.stats import kurtosis#calculate kurt
 import os#interact with operation system
 
 #deal with text
@@ -75,7 +78,7 @@ class Yunbase():
                       list_gaps:list[int]=[1],
                       word2vec_models:list[tuple]=[],
                       text_cols:list[str]=[],
-                      print_feature_importance:bool=False,
+                      plot_feature_importance:bool=False,
                       log:int=100,
                       exp_mode:bool=False,
                       use_reduce_memory:bool=False,
@@ -117,7 +120,7 @@ class Yunbase():
         word2vec_models       :Use models such as tfidf to extract features of string columns 
                                example:word2vec_models=[(TfidfVectorizer(max_features=250,ngram_range=(2,3)),col,model_name)]
         text_cols             :extract features of words, sentences, and paragraphs from text here.
-        print_feature_importance:after model training,whether print feature importance or not
+        plot_feature_importance:after model training,whether print feature importance or not
         log                   :log trees are trained in the GBDT model to output a validation set score once.
         exp_mode              :In regression tasks, the distribution of target_col is a long tail distribution, 
                                and this parameter can be used to perform log transform on the target_col.
@@ -207,7 +210,7 @@ class Yunbase():
         self.word2vec_models=word2vec_models
         self.word2vec_cols=[]#origin cols that need to use in tfidf model.
         self.text_cols=text_cols#extract features of words, sentences, and paragraphs from text here.
-        self.print_feature_importance=print_feature_importance
+        self.plot_feature_importance=plot_feature_importance
         #Due to the presence of special characters in some column names, 
         #they cannot be directly passed into the LGB model training, so conversion is required
         self.col2name=None
@@ -569,11 +572,6 @@ class Yunbase():
                 le=self.trained_le[f'le_{col}_fold{fold}.model']
             except:#training
                 value=df[col].value_counts().to_dict()
-                
-                # new_value={}
-                # for k,v in value.items():
-                #     new_value[k]=v
-                # value=new_value
                 le={}
                 for k,v in value.items():
                     le[k]=len(le)
@@ -743,7 +741,7 @@ class Yunbase():
             raise ValueError("len(models) can't be 0.")
         if self.save_test_preds:#True
             raise ValueError("purged CV can't support save test_preds.")
-        if self.print_feature_importance:
+        if self.plot_feature_importance:
             raise ValueError("purged CV can't support print feature_importance.")
         if (self.use_optuna_find_params!=0) or (self.optuna_direction!=None):
             raise ValueError("purged CV can't support optuna find params.")
@@ -1006,21 +1004,6 @@ class Yunbase():
                          categorical_feature=self.categoryname,
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
                     )
-                if (use_optuna==False) and (self.print_feature_importance):#print feature importance when not use optuna to find params.
-                    #here we only care origin features in X.
-                    columns=[self.name2col[x] for x in list(X.columns) if x not in self.word2vec_colnames+self.labelencoder_colnames]
-                    importances=model.feature_importances_[:len(columns)]
-                    useless_cols=[]
-                    col2importance={}
-                    for i in range(len(columns)):
-                        if importances[i]==0:
-                            useless_cols.append(columns[i])
-                        else:
-                            col2importance[columns[i]]=importances[i]
-                    #descending order
-                    col2importance = dict(sorted(col2importance.items(), key=lambda x: x, reverse=True))
-                    print(f"feature_importance:{col2importance}")
-                    print(f"useless_cols={useless_cols}")
             elif 'cat' in model_name:
                 #gpu params isn't set
                 if self.device in ['cuda','gpu']:#gpu mode when training
@@ -1073,6 +1056,37 @@ class Yunbase():
             else:#other models such as ridge,LinearRegression
                 model.fit(X_train,y_train) 
 
+            #print feature importance when not use optuna to find params.
+            if (use_optuna==False) and (self.plot_feature_importance):
+                #can only support GBDT.
+                if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
+                    origin_features=[]
+                    for col in X_train.columns:
+                        try:#named 'col_1' when training
+                            origin_features.append(self.name2col[col])
+                        except:#tfidf feature
+                            origin_features.append(col)
+                            
+                    feature_importance=model.feature_importances_
+                    #convert to percentage
+                    if 'lgb' in model_name:
+                        feature_importance=feature_importance/np.sum(feature_importance)
+                    feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
+                    feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
+                    self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold{fold}_feature_importance.pkl')
+                    bestk,worstk=min(10,int(len(origin_features)*0.1+1)),min(10,int(len(origin_features)*0.1+1))
+                    print(f"top best {bestk} features is :{list(feat_import_dict.keys())[:bestk]}")
+                    print(f"top worst {worstk} features is :{list(feat_import_dict.keys())[-worstk:]}")
+
+                    #plot feature importance
+                    plt.figure(figsize = (12, 4))
+                    sns.barplot(
+                        y=list(feat_import_dict.keys())[:bestk],
+                        x=list(feat_import_dict.values())[:bestk],
+                    )
+                    plt.title(f"{model_name} fold {fold} Feature Importance")
+                    plt.show()
+            
             if self.objective=='regression':
                 try:
                     oof_preds[valid_index]=model.predict(X_valid)
