@@ -15,3 +15,5 @@ ftfy
 nltk
 emoji
 pytorch_tabnet
+matplotlib
+seaborn
