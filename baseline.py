@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/13
+@update_time:2024/11/14
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -488,12 +488,8 @@ class Yunbase():
                 try:#if str(list),transform '[a,b]' to [a,b]
                     df[col]=df[col].apply(lambda x:ast.literal_eval(x))
                 except:#origin data is list or data can't be parsed.
-                    #find first data is not nan,if data.dtype!=list, then error
-                    for i in range(len(df)):
-                        v=df[col].values[i]
-                        if v==v:#find first data isn't nan
-                            if not isinstance(v, list):
-                                raise ValueError(f"col '{col}' not a list.")
+                    if not isinstance(df[col].dropna().values[0],list):
+                        raise ValueError(f"col '{col}' not a list.")
                 
                 #add index,data of list can groupby index.
                 df['index']=np.arange(len(df))
@@ -701,20 +697,24 @@ class Yunbase():
         if mode=='train':
             #read csv,parquet or csv_file
             self.train_path_or_file=path_or_file
-        try:
-            file=pl.read_csv(path_or_file)
-            file=file.to_pandas()
-        except:
-            try:
+        
+        if type(path_or_file)==str:#path
+            if path_or_file[-4:]=='.csv':
+                file=pl.read_csv(path_or_file)
+            elif path_or_file[-8:]=='.parquet':
                 file=pl.read_parquet(path_or_file)
+            try:#if load csv or parquet file
                 file=file.to_pandas()
-            except:#file.copy()
-                file=path_or_file.copy()
-        #polars to pandas.
-        if isinstance(file, pl.DataFrame):
-            file=file.to_pandas()
-        if not isinstance(file, pd.DataFrame):
-            raise ValueError("train_path_or_file is not pd.DataFrame.")
+            except:
+                raise ValueError("Yunbase can only support csv file or parquet file")
+        else:#file
+            file=path_or_file.copy()
+            #polars to pandas.
+            if isinstance(file, pl.DataFrame):
+                file=file.to_pandas()
+            if not isinstance(file, pd.DataFrame):
+                raise ValueError(f"{mode}_path_or_file is not pd.DataFrame.")
+                
         if mode=='train':
             self.train=file.copy()
         elif mode=='test':
@@ -723,7 +723,8 @@ class Yunbase():
             return file
 
     #https://www.kaggle.com/code/marketneutral/purged-time-series-cv-xgboost-optuna
-    def purged_cross_validation(self,train:pd.DataFrame,test:pd.DataFrame,
+    def purged_cross_validation(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
+                                test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',
                                 date_col:str='date',train_gap_each_fold:int=31,#one month
                                 train_test_gap:int=7,#a week
                                 train_date_range:int=0,test_date_range:int=0,
@@ -738,13 +739,13 @@ class Yunbase():
             raise ValueError("len(models) can't be 0.")
         if (self.use_optuna_find_params!=0) or (self.optuna_direction!=None):
             raise ValueError("purged CV can't support optuna find params.")
-        self.train=train
+        self.load_data(path_or_file=train_path_or_file,mode='train')
+        self.load_data(path_or_file=test_path_or_file,mode='test')
         self.date_col=date_col
         self.weight_col=weight_col
         if self.weight_col not in list(self.train.columns):
             self.train[self.weight_col]=1
         
-        self.test=test
         self.category_cols=category_cols
         self.target_dtype=self.train[self.target_col].dtype
         if self.objective!='regression':#check target
@@ -911,8 +912,7 @@ class Yunbase():
                             
                         feature_importance=model.feature_importances_
                         #convert to percentage
-                        if 'lgb' in model_name:
-                            feature_importance=feature_importance/np.sum(feature_importance)
+                        feature_importance=feature_importance/np.sum(feature_importance)
                         feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
                         feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
                         self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold{fold}_feature_importance.pkl')
@@ -957,7 +957,7 @@ class Yunbase():
         if self.exp_mode:#use log transform for target_col
             self.exp_mode_b=-y_train.min()
             y_train=np.log1p(y_train+self.exp_mode_b)
-        test_X=test.drop([self.date_col],axis=1)
+        test_X=self.test.drop([self.date_col],axis=1)
 
         X_train=self.CV_FE(X_train,mode='train',fold=self.num_folds)
         test_X=self.CV_FE(test_X,mode='test',fold=self.num_folds)
@@ -1131,8 +1131,7 @@ class Yunbase():
                             
                     feature_importance=model.feature_importances_
                     #convert to percentage
-                    if 'lgb' in model_name:
-                        feature_importance=feature_importance/np.sum(feature_importance)
+                    feature_importance=feature_importance/np.sum(feature_importance)
                     feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
                     feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
                     self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold{fold}_feature_importance.pkl')
@@ -1150,14 +1149,14 @@ class Yunbase():
                     plt.show()
             
             if self.objective=='regression':
-                try:
+                if 'tabnet' not in model_name:
                     oof_preds[valid_index]=model.predict(X_valid)
-                except:#NN such as tabnet
+                else:#tabnet
                     oof_preds[valid_index]=model.predict(X_valid.to_numpy()).reshape(-1)
             else:
-                try:
+                if 'tabnet' not in model_name:
                     oof_preds[valid_index]=model.predict_proba(X_valid)
-                except:#NN such as tabnet
+                else:#tabnet
                     oof_preds[valid_index]=model.predict_proba(X_valid.to_numpy())
             if not use_optuna:#not find_params(training)
                 if 'tabnet' not in model_name:
@@ -1468,7 +1467,7 @@ class Yunbase():
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
                 try:
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
-                except:
+                except:#catboost
                     test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
                 test_preds[cnt]=test_pred
@@ -1497,8 +1496,6 @@ class Yunbase():
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             if self.exp_mode:
                 test_preds=np.expm1(test_preds)-self.exp_mode_b       
-            if self.save_test_preds:
-                np.save(self.model_save_path+'test_preds.npy',test_preds)
             return test_preds
         else:#classification 
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
@@ -1543,6 +1540,12 @@ class Yunbase():
             test_preds=np.argmax(test_preds,axis=1)
             return test_preds
 
+    def predict_proba(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)->np.array:
+        self.save_test_preds=True
+        test_preds=self.predict(test_path_or_file,weights)
+        test_proba=np.load(self.model_save_path+'test_preds.npy')
+        return test_proba
+        
     #ensemble some solutions.
     def ensemble(self,solution_paths_or_files:list[str]=[],weights=None):
         #If you don't set weights,then use mean value as result.
@@ -1558,11 +1561,14 @@ class Yunbase():
         if (self.objective=='regression') or(self.metric=='auc'):
             final_solutions=[]
             for i in range(n):
-                try:
-                    solution=pl.read_csv(solution_paths_or_files[i])
-                    solution=solution.to_pandas()
-                except:#csv_file
-                    solution=solution_paths_or_files[i]
+                if type(solution_paths_or_files[i])==str:#csv file path
+                    try:
+                        solution=pl.read_csv(solution_paths_or_files[i])
+                        solution=solution.to_pandas()
+                    except:
+                        raise ValueError("Yunbase can only support csv file.")
+                else:#csv_file have load
+                    solution=solution_paths_or_files[i].copy()
                 if not isinstance(solution, pd.DataFrame):
                     raise ValueError("solution_paths_or_files is not pd.DataFrame.")
                 final_solutions.append(weights[i]*solution[self.target_col].values)
@@ -1572,11 +1578,14 @@ class Yunbase():
             #n solutions,m datas
             solutions=[]
             for i in range(n):
-                try:
-                    solution=pl.read_csv(solution_paths_or_files[i])
-                    solution=solution.to_pandas()
-                except:#csv_file
-                    solution=solution_paths_or_files[i]
+                if type(solution_paths_or_files[i])==str:
+                    try:
+                        solution=pl.read_csv(solution_paths_or_files[i])
+                        solution=solution.to_pandas()
+                    except:
+                        raise ValueError("Yunbase can only support csv file.")
+                else:#csv_file have load
+                    solution=solution_paths_or_files[i].copy()
                 if not isinstance(solution, pd.DataFrame):
                     raise ValueError("solution_paths_or_files is not pd.DataFrame.")
                 solutions.append(solution[self.target_col].values)
