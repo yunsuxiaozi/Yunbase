@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/14
+@update_time:2024/11/16
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -729,6 +729,7 @@ class Yunbase():
                                 train_test_gap:int=7,#a week
                                 train_date_range:int=0,test_date_range:int=0,
                                 category_cols:list[str]=[],
+                                use_seasonal_features:bool=True,
                                 weight_col:str='weight',
                                ):
         if self.use_pseudo_label:
@@ -782,26 +783,26 @@ class Yunbase():
         self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
         self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
 
-        print("< date col FE >")# not use onehot encoder for these columns
-        self.train['day']=self.train[self.date_col]%365
-        self.train['dayofweek']=self.train[self.date_col]%7
-        self.train['month']=self.train[self.date_col]%31
-        self.train['sin_dayofweek']=np.sin(2*np.pi*self.train['dayofweek']/7)
-        self.train['cos_dayofweek']=np.cos(2*np.pi*self.train['dayofweek']/7)
-        self.train['sin_day']=np.sin(2*np.pi*self.train['day']/365)
-        self.train['cos_day']=np.cos(2*np.pi*self.train['day']/365)
-        self.train['sin_month']=np.sin(2*np.pi*self.train['month']/31)
-        self.train['cos_month']=np.cos(2*np.pi*self.train['month']/31)
-
-        self.test['day']=self.test[self.date_col]%365
-        self.test['dayofweek']=self.test[self.date_col]%7
-        self.test['month']=self.test[self.date_col]%31
-        self.test['sin_dayofweek']=np.sin(2*np.pi*self.test['dayofweek']/7)
-        self.test['cos_dayofweek']=np.cos(2*np.pi*self.test['dayofweek']/7)
-        self.test['sin_day']=np.sin(2*np.pi*self.test['day']/365)
-        self.test['cos_day']=np.cos(2*np.pi*self.test['day']/365)
-        self.test['sin_month']=np.sin(2*np.pi*self.test['month']/31)
-        self.test['cos_month']=np.cos(2*np.pi*self.test['month']/31)
+        if use_seasonal_features:
+            self.train['day']=self.train[self.date_col]%365
+            self.train['dayofweek']=self.train[self.date_col]%7
+            self.train['month']=self.train[self.date_col]%31
+            self.train['sin_dayofweek']=np.sin(2*np.pi*self.train['dayofweek']/7)
+            self.train['cos_dayofweek']=np.cos(2*np.pi*self.train['dayofweek']/7)
+            self.train['sin_day']=np.sin(2*np.pi*self.train['day']/365)
+            self.train['cos_day']=np.cos(2*np.pi*self.train['day']/365)
+            self.train['sin_month']=np.sin(2*np.pi*self.train['month']/31)
+            self.train['cos_month']=np.cos(2*np.pi*self.train['month']/31)
+    
+            self.test['day']=self.test[self.date_col]%365
+            self.test['dayofweek']=self.test[self.date_col]%7
+            self.test['month']=self.test[self.date_col]%31
+            self.test['sin_dayofweek']=np.sin(2*np.pi*self.test['dayofweek']/7)
+            self.test['cos_dayofweek']=np.cos(2*np.pi*self.test['dayofweek']/7)
+            self.test['sin_day']=np.sin(2*np.pi*self.test['day']/365)
+            self.test['cos_day']=np.cos(2*np.pi*self.test['day']/365)
+            self.test['sin_month']=np.sin(2*np.pi*self.test['month']/31)
+            self.test['cos_month']=np.cos(2*np.pi*self.test['month']/31)
 
         #use origin columns
         self.word2vec_colnames=self.word2vec_cols
