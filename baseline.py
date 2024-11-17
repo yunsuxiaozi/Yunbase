@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/16
+@update_time:2024/11/17
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -82,7 +82,8 @@ class Yunbase():
                       log:int=100,
                       exp_mode:bool=False,
                       use_reduce_memory:bool=False,
-                      AGGREGATIONS:list[str]=['nunique','count','min','max','first','last', 'mean','median','sum','std','skew'],#kurtosis
+                      AGGREGATIONS:list=['nunique','count','min','max','first',
+                                           'last', 'mean','median','sum','std','skew',kurtosis],
                 )->None:
         """
         num_folds             :the number of folds for k-fold cross validation.
@@ -126,6 +127,8 @@ class Yunbase():
                                and this parameter can be used to perform log transform on the target_col.
         use_reduce_memory     :if use function reduce_mem_usage(),then set this parameter True.
         cross_cols            :Construct features for adding, subtracting, multiplying, and dividing these columns.
+        AGGREGATIONS          :['nunique','count','min','max','first','last',
+                               'mean','median','sum','std','skew',kurtosis,q1,q3],
         """
         
         #currented supported metric
@@ -261,6 +264,12 @@ class Yunbase():
         with open(path, mode="rb") as f:
             data = dill.load(f)
             return data
+
+    #sample AGGREGATIONS
+    def q1(self,x):
+        return x.quantile(0.25)
+    def q3(self,x):
+        return x.quantile(0.75)
         
     #Traverse all columns of df, modify data types to reduce memory usage
     def reduce_mem_usage(self,df:pd.DataFrame, float16_as32:bool=True)->pd.DataFrame:
@@ -457,10 +466,29 @@ class Yunbase():
             #one_hot_cols
             self.one_hot_cols=[]
             self.nunique_2_cols=[]
-            for col in df.columns:
-                if col not in [self.target_col,self.group_col,self.weight_col]+self.list_cols+self.category_cols+self.drop_cols:
+            for col in df.drop(
+                [self.target_col,self.group_col,self.weight_col]+\
+                self.list_cols+self.category_cols+self.drop_cols
+                ,axis=1,errors='ignore'
+            ).columns:
+                #If it is a numerical type, one hot is generally not considered.
+                if (df[col].dtype==object) and (
+                    not (
+                    #such as sin_month,month have already been onehot.
+                    col.startswith('sin') or col.startswith('cos') or
+                    #AGGREGATION don't use onehot.
+                    col.endswith('_nunique') or col.endswith('_count') or
+                    col.endswith('_min') or col.endswith('_max') or 
+                    col.endswith('_first') or col.endswith('_last') or
+                    col.endswith('_mean') or col.endswith('_median') or 
+                    col.endswith('_sum') or col.endswith('_std') or col.endswith('_skew') or 
+                    #q0:0.05,q1:0.25,q2:0.5,q3:0.75,q4:0.95
+                    col.endswith('_kurtosis') or col.endswith('_q0') or col.endswith('_q1') or
+                    col.endswith('_q2') or col.endswith('_q3') or col.endswith('_q4')
+                    )
+                ):
                     if (df[col].nunique()<self.one_hot_max) and (df[col].nunique()>2):
-                        self.one_hot_cols.append([col,list(df[col].unique())]) 
+                        self.one_hot_cols.append([col,list(df[col].value_counts().to_dict().keys())]) 
                     elif (self.one_hot_max>=2) and (df[col].nunique()==2):
                         self.nunique_2_cols.append([col,list(df[col].unique())[0]])
         if self.one_hot_max>1:
@@ -495,6 +523,7 @@ class Yunbase():
                 df['index']=np.arange(len(df))
                 #construct origin feats 
                 list_col_df=df.copy().explode(col)[['index',col]]
+                list_col_df[col]=list_col_df[col].astype(np.float32)
 
                 group_cols=[col]
                 for gap in self.list_gaps:
@@ -750,7 +779,7 @@ class Yunbase():
         self.category_cols=category_cols
         self.target_dtype=self.train[self.target_col].dtype
         if self.objective!='regression':#check target
-            unique_target=sorted(self.train[self.target_col].unique())
+            unique_target=list(self.train[self.target_col].value_counts().to_dict().keys())
             if unique_target!=list(np.arange(len(unique_target))):
                 raise ValueError(f"purged CV can only support target from 0 to {len(unique_target)-1}")
         print("< preprocess date_col >")
