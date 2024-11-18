@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/17
+@update_time:2024/11/18
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -37,6 +37,7 @@ import ftfy#fixes text for you,correct unicode issues.
 import nltk #Natural Language toolkit
 from nltk.corpus import stopwords#import english stopwords
 import emoji#deal with emoji in natrual language
+from sklearn.decomposition import TruncatedSVD#Truncated Singular Value Decomposition
 
 import warnings#avoid some negligible errors
 #The filterwarnings () method is used to set warning filters, which can control the output method and level of warning information.
@@ -77,6 +78,7 @@ class Yunbase():
                       list_cols:list[str]=[],
                       list_gaps:list[int]=[1],
                       word2vec_models:list[tuple]=[],
+                      use_svd:bool=False,
                       text_cols:list[str]=[],
                       plot_feature_importance:bool=False,
                       log:int=100,
@@ -120,6 +122,7 @@ class Yunbase():
         list_gaps             :extract features for list_cols.example=[1,2,4]
         word2vec_models       :Use models such as tfidf to extract features of string columns 
                                example:word2vec_models=[(TfidfVectorizer(max_features=250,ngram_range=(2,3)),col,model_name)]
+        use_svd               :use Truncated  Singular value decomposition to word2vec features.
         text_cols             :extract features of words, sentences, and paragraphs from text here.
         plot_feature_importance:after model training,whether print feature importance or not
         log                   :log trees are trained in the GBDT model to output a validation set score once.
@@ -153,7 +156,7 @@ class Yunbase():
         self.seed=seed
         self.models=models
         self.FE=FE
-        self.drop_cols=drop_cols
+        self.drop_cols=self.colname_clean(drop_cols)
         
         self.objective=objective.lower()
         #binary multi_class,regression
@@ -206,17 +209,17 @@ class Yunbase():
         self.test=None#test data will be replaced when call predict function.
         self.use_pseudo_label=use_pseudo_label
         self.use_high_corr_feat=use_high_corr_feat
-        self.cross_cols=cross_cols
-        self.labelencoder_cols=labelencoder_cols
-        self.list_cols=list(set(list_cols))
+        self.cross_cols=self.colname_clean(cross_cols)
+        self.labelencoder_cols=self.colname_clean(labelencoder_cols)
+        self.list_cols=self.colname_clean(list_cols)
         self.list_gaps=sorted(list_gaps)
         self.word2vec_models=word2vec_models
+        self.use_svd=use_svd
         self.word2vec_cols=[]#origin cols that need to use in tfidf model.
-        self.text_cols=text_cols#extract features of words, sentences, and paragraphs from text here.
+        self.text_cols=self.colname_clean(text_cols)#extract features of words, sentences, and paragraphs from text here.
         self.plot_feature_importance=plot_feature_importance
         #Due to the presence of special characters in some column names, 
         #they cannot be directly passed into the LGB model training, so conversion is required
-        self.col2name=None
         self.log=log
         self.exp_mode=exp_mode
         if self.exp_mode not in [True,False]:
@@ -239,6 +242,7 @@ class Yunbase():
         self.trained_models=[]#trained model
         self.trained_le={}
         self.trained_wordvec={}
+        self.trained_svd={}
         self.onehot_valuecounts={}
         #make folder to save model trained.such as GBDT,word2vec.
         self.model_save_path="Yunbase_info/"
@@ -367,12 +371,6 @@ class Yunbase():
         if self.FE!=None:
             #use your custom metric first
             df=self.FE(df)
-        #category columns
-        for col in self.category_cols:
-            #preprocessing
-            df[col]=df[col].apply(lambda x:str(x).lower())
-            df=self.label_encoder(df,label_encoder_cols=[col],fold=self.num_folds)
-            df[col]=df[col].astype('category')
         
         #text feature extract,such as word,sentence,paragraph.
         #The reason why it needs to be done earlier is that it will generate columns such as nunique=1 or
@@ -394,17 +392,17 @@ class Yunbase():
                 self.PrintColor(f"-> for column {tcol} word feature",color=Fore.RED)
                 tcol_word_df=df[['index',tcol]].copy()
                 #get word_list   [index,tcol,word_list]
-                tcol_word_df['word']=tcol_word_df[tcol].apply(lambda x: re.split('\\.|\\?|\\!\\ |\\,',x))
+                tcol_word_df[f'{tcol}_word']=tcol_word_df[tcol].apply(lambda x: re.split('\\.|\\?|\\!\\ |\\,',x))
                 #[index,single_word]
-                tcol_word_df=tcol_word_df.explode('word')[['index','word']]
+                tcol_word_df=tcol_word_df.explode(f'{tcol}_word')[['index',f'{tcol}_word']]
                 #[index,single_word,single_word_len]
-                tcol_word_df['word_len'] = tcol_word_df['word'].apply(len)
+                tcol_word_df[f'{tcol}_word_len'] = tcol_word_df[f'{tcol}_word'].apply(len)
                 #data clean [index,single_word,single_word_len]
-                tcol_word_df=tcol_word_df[tcol_word_df['word_len']!=0]
+                tcol_word_df=tcol_word_df[tcol_word_df[f'{tcol}_word_len']!=0]
                 #for word features, extract the difference in length between the two words before and after.
-                group_cols=['word_len']
+                group_cols=[f'{tcol}_word_len']
                 for gap in [1]:
-                    for col in ['word_len']:
+                    for col in [f'{tcol}_word_len']:
                         tcol_word_df[f'{col}_diff{gap}']=tcol_word_df.groupby(['index'])[col].diff(gap)
                         group_cols.append(f'{col}_diff{gap}')
                 tcol_word_agg_df = tcol_word_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
@@ -414,19 +412,19 @@ class Yunbase():
                 self.PrintColor(f"-> for column {tcol} sentence feature",color=Fore.RED)
                 tcol_sent_df=df[['index',tcol]].copy()
                 #get sent_list   [index,tcol,sent_list]
-                tcol_sent_df['sent']=tcol_sent_df[tcol].apply(lambda x: re.split('\\.|\\?|\\!',x))
+                tcol_sent_df[f'{tcol}_sent']=tcol_sent_df[tcol].apply(lambda x: re.split('\\.|\\?|\\!',x))
                 #[index,single_sent]
-                tcol_sent_df=tcol_sent_df.explode('sent')[['index','sent']]
+                tcol_sent_df=tcol_sent_df.explode(f'{tcol}_sent')[['index',f'{tcol}_sent']]
                 #[index,single_sent,single_sent_len]
-                tcol_sent_df['sent_len'] = tcol_sent_df['sent'].apply(len)
-                tcol_sent_df['sent_word_count'] = tcol_sent_df['sent'].apply(lambda x:len(re.split('\\ |\\,',x)))
+                tcol_sent_df[f'{tcol}_sent_len'] = tcol_sent_df[f'{tcol}_sent'].apply(len)
+                tcol_sent_df[f'{tcol}_sent_word_count'] = tcol_sent_df[f'{tcol}_sent'].apply(lambda x:len(re.split('\\ |\\,',x)))
                 #data clean [index,single_sent,single_sent_len]
-                group_cols=['sent_len','sent_word_count']
+                group_cols=[f'{tcol}_sent_len',f'{tcol}_sent_word_count']
                 for gcol in group_cols:
                     tcol_sent_df=tcol_sent_df[tcol_sent_df[gcol]!=0]
                 #for sent features, extract the difference in length between the two sents before and after.
                 for gap in [1]:
-                    for col in ['sent_len','sent_word_count']:
+                    for col in [f'{tcol}_sent_len',f'{tcol}_sent_word_count']:
                         tcol_sent_df[f'{col}_diff{gap}']=tcol_sent_df.groupby(['index'])[col].diff(gap)
                         group_cols.append(f'{col}_diff{gap}')
                 tcol_sent_agg_df = tcol_sent_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
@@ -436,19 +434,19 @@ class Yunbase():
                 self.PrintColor(f"-> for column {tcol} paragraph feature",color=Fore.RED)
                 tcol_para_df=df[['index',tcol]].copy()
                 #get para_list   [index,tcol,para_list]
-                tcol_para_df['para']=tcol_para_df[tcol].apply(lambda x: x.split("\n"))
+                tcol_para_df[f'{tcol}_para']=tcol_para_df[tcol].apply(lambda x: x.split("\n"))
                 #[index,single_para]
-                tcol_para_df=tcol_para_df.explode('para')[['index','para']]
-                tcol_para_df['para_len'] = tcol_para_df['para'].apply(len)
-                tcol_para_df['para_sent_count'] = tcol_para_df['para'].apply(lambda x: len(re.split('\\.|\\?|\\!',x)))
-                tcol_para_df['para_word_count'] = tcol_para_df['para'].apply(lambda x: len(re.split('\\.|\\?|\\!\\ |\\,',x)))
+                tcol_para_df=tcol_para_df.explode(f'{tcol}_para')[['index',f'{tcol}_para']]
+                tcol_para_df[f'{tcol}_para_len'] = tcol_para_df[f'{tcol}_para'].apply(len)
+                tcol_para_df[f'{tcol}_para_sent_count'] = tcol_para_df[f'{tcol}_para'].apply(lambda x: len(re.split('\\.|\\?|\\!',x)))
+                tcol_para_df[f'{tcol}_para_word_count'] = tcol_para_df[f'{tcol}_para'].apply(lambda x: len(re.split('\\.|\\?|\\!\\ |\\,',x)))
                 #data clean [index,single_sent,single_sent_len]
-                group_cols=['para_len','para_sent_count','para_word_count']
+                group_cols=[f'{tcol}_para_len',f'{tcol}_para_sent_count',f'{tcol}_para_word_count']
                 for gcol in group_cols:
                     tcol_para_df=tcol_para_df[tcol_para_df[gcol]!=0]
                 #for sent features, extract the difference in length between the two sents before and after.
                 for gap in [1]:
-                    for col in ['para_len','para_sent_count','para_word_count']:
+                    for col in [f'{tcol}_para_len',f'{tcol}_para_sent_count',f'{tcol}_para_word_count']:
                         tcol_para_df[f'{col}_diff{gap}']=tcol_para_df.groupby(['index'])[col].diff(gap)
                         group_cols.append(f'{col}_diff{gap}')
                 tcol_para_agg_df = tcol_para_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
@@ -491,24 +489,37 @@ class Yunbase():
                         self.one_hot_cols.append([col,list(df[col].value_counts().to_dict().keys())]) 
                     elif (self.one_hot_max>=2) and (df[col].nunique()==2):
                         self.nunique_2_cols.append([col,list(df[col].unique())[0]])
+        
+        df=pl.from_pandas(df)
         if self.one_hot_max>1:
             print("< one hot encoder >")          
             for i in range(len(self.one_hot_cols)):
                 col,nunique=self.one_hot_cols[i]
                 for u in nunique:
-                    df[f"{col}_{u}"]=(df[col]==u).astype(np.int8)
+                    df=df.with_columns((pl.col(col)==u).cast(pl.Int8).alias(f"{col}_{u}"))
                 #one_hot_value_count
                 try:
                     col_valuecounts=self.onehot_valuecounts[col]
                 except:
                     col_valuecounts=df[col].value_counts().to_dict()
+                    new_col_valuecounts={}
+                    for k,v in zip(col_valuecounts['v'],col_valuecounts['count']):
+                        new_col_valuecounts[k]=v
+                    col_valuecounts=new_col_valuecounts
                     self.onehot_valuecounts[col]=col_valuecounts
-                df[col+"_valuecounts"]=df[col].apply(lambda x:col_valuecounts.get(x,np.nan))
-                df[col+"_valuecounts"]=df[col+"_valuecounts"].apply(lambda x:np.nan if x<5 else x)
-                
+                df=df.with_columns(pl.col(col).replace(col_valuecounts,default=np.nan).alias(col+"_valuecounts"))
+                df=df.with_columns((pl.col(col+"_valuecounts")>=5)*pl.col(col+"_valuecounts"))    
             for i in range(len(self.nunique_2_cols)):
                 c,u=self.nunique_2_cols[i]
-                df[f"{c}_{u}"]=(df[c]==u).astype(np.int8)
+                df=df.with_columns((pl.col(c)==u).cast(pl.Int8).alias(f"{c}_{u}"))
+        df=df.to_pandas()
+
+        #category columns
+        for col in self.category_cols:
+            #preprocessing
+            df[col]=df[col].apply(lambda x:str(x).lower())
+            df=self.label_encoder(df,label_encoder_cols=[col],fold=self.num_folds)
+            df[col]=df[col].astype('category')
         
         if len(self.list_cols):
             print("< list column's feature >")
@@ -561,8 +572,7 @@ class Yunbase():
             self.word2vec_cols=[]
             for (model,col,model_name) in self.word2vec_models:
                 self.word2vec_cols.append(col)
-            #set to duplicate removal
-            self.word2vec_cols=list(set(self.word2vec_cols))
+            self.word2vec_cols=self.colname_clean(self.word2vec_cols)
            
         if (mode=='train') and (self.use_high_corr_feat==False):#drop high correlation features
             print("< drop high correlation feature >")
@@ -579,7 +589,8 @@ class Yunbase():
         
         print("< drop useless cols >")
         total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols
-        total_drop_cols=[col for col in total_drop_cols if col not in self.word2vec_cols+self.labelencoder_cols]
+        total_drop_cols=[col for col in total_drop_cols if col not in \
+                         self.word2vec_cols+self.labelencoder_cols+self.category_cols]
         df.drop(total_drop_cols,axis=1,inplace=True,errors='ignore')
         if self.use_reduce_memory:
             df=self.reduce_mem_usage(df,float16_as32=True)
@@ -588,10 +599,7 @@ class Yunbase():
 
     def label_encoder(self,df,label_encoder_cols,fold):
         for col in label_encoder_cols:
-            try:
-                self.PrintColor(f"-> for column {self.name2col[col]} labelencoder feature",color=Fore.RED)
-            except:
-                self.PrintColor(f"-> for column {col} labelencoder feature",color=Fore.RED)
+            self.PrintColor(f"-> for column {col} labelencoder feature",color=Fore.RED)
             #load model when model is existed,fit when model isn't exist.
             try:
                 le=self.trained_le[f'le_{col}_fold{fold}.model']
@@ -608,15 +616,14 @@ class Yunbase():
     #Feature engineering that needs to be done internally in cross validation.
     def CV_FE(self,df:pd.DataFrame,mode:str='train',fold:int=0)->pd.DataFrame:
         #labelencoder
-        if len(self.labelencoder_colnames):
+        if len(self.labelencoder_cols):
             print("< label encoder >")
-            df=self.label_encoder(df,label_encoder_cols=self.labelencoder_colnames,fold=fold)
+            df=self.label_encoder(df,label_encoder_cols=self.labelencoder_cols,fold=fold)
 
         if len(self.word2vec_models):
             print("< word2vec >")
             for (word2vec,col,model_name) in self.word2vec_models:
                 self.PrintColor(f"-> for column {col} {model_name} word2vec feature",color=Fore.RED)
-                col=self.col2name[col]
                 df[col]=df[col].fillna('nan')
                 #load when model is existed.fit when model isn't existed.
                 try:
@@ -626,9 +633,20 @@ class Yunbase():
                     self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_fold{fold}.model') 
                     self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]=copy.deepcopy(word2vec)
                 word2vec_feats=word2vec.transform(df[col].apply(lambda x: self.clean_text(x)  )).toarray()
+
+                if self.use_svd:
+                    try:
+                        svd=self.trained_svd[f'{model_name}_svd_{col}_fold{fold}.model']
+                    except:
+                        svd = TruncatedSVD(n_components=word2vec_feats.shape[1]//3+1,
+                                            n_iter=10, random_state=self.seed)
+                        svd.fit(word2vec_feats)
+                        self.trained_svd[f'{model_name}_svd_{col}_fold{fold}.model']=copy.deepcopy(svd)
+                        self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_svd_{col}_fold{fold}.model') 
+                    word2vec_feats=svd.transform(word2vec_feats)
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
-        df.drop(self.word2vec_colnames+self.labelencoder_colnames,axis=1,inplace=True)
+        df.drop(self.word2vec_cols+self.labelencoder_cols,axis=1,inplace=True)
         #after this operation,df will be dropped into model,so we need to Convert object to floating-point numbers
         for col in df.columns:
             if (df[col].dtype==object):
@@ -722,11 +740,18 @@ class Yunbase():
         print(f"best_params={best_params}")
         return best_params
 
+    def colname_clean(self,cols):
+        #deal with json character
+        json_char=',[]{}:"\\'
+        for i in range(len(cols)):
+            for char in json_char:
+                cols[i]=cols[i].replace(char,'json')
+        return cols
+
     def load_data(self,path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',mode:str='train')->None|pd.DataFrame:
         if mode=='train':
             #read csv,parquet or csv_file
             self.train_path_or_file=path_or_file
-        
         if type(path_or_file)==str:#path
             if path_or_file[-4:]=='.csv':
                 file=pl.read_csv(path_or_file)
@@ -743,7 +768,9 @@ class Yunbase():
                 file=file.to_pandas()
             if not isinstance(file, pd.DataFrame):
                 raise ValueError(f"{mode}_path_or_file is not pd.DataFrame.")
-                
+        
+        file.columns=self.colname_clean(list(file.columns))
+        
         if mode=='train':
             self.train=file.copy()
         elif mode=='test':
@@ -776,7 +803,7 @@ class Yunbase():
         if self.weight_col not in list(self.train.columns):
             self.train[self.weight_col]=1
         
-        self.category_cols=category_cols
+        self.category_cols=self.colname_clean(category_cols)
         self.target_dtype=self.train[self.target_col].dtype
         if self.objective!='regression':#check target
             unique_target=list(self.train[self.target_col].value_counts().to_dict().keys())
@@ -832,16 +859,8 @@ class Yunbase():
             self.test['cos_day']=np.cos(2*np.pi*self.test['day']/365)
             self.test['sin_month']=np.sin(2*np.pi*self.test['month']/31)
             self.test['cos_month']=np.cos(2*np.pi*self.test['month']/31)
-
-        #use origin columns
-        self.word2vec_colnames=self.word2vec_cols
-        self.labelencoder_colnames=self.labelencoder_cols
-        self.col2name={}
-        self.name2col={}
+        
         train_columns=list(self.train.columns)
-        for i in range(len(train_columns)):
-            self.col2name[train_columns[i]]=train_columns[i]
-            self.name2col[train_columns[i]]=train_columns[i]
         
         self.PrintColor("purged CV")
         for (model,model_name) in self.models:
@@ -935,10 +954,7 @@ class Yunbase():
                     if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
                         origin_features=[]
                         for col in X_train.columns:
-                            try:#named 'col_1' when training
-                                origin_features.append(self.name2col[col])
-                            except:#tfidf feature
-                                origin_features.append(col)
+                            origin_features.append(col)
                             
                         feature_importance=model.feature_importances_
                         #convert to percentage
@@ -1081,7 +1097,7 @@ class Yunbase():
                 test_y=test_copy[self.target_col]
                 #concat will transform 'category' to 'object'
                 X_train=pd.concat((X_train,test_X),axis=0)
-                X_train[self.categoryname]=X_train[self.categoryname].astype('category')
+                X_train[self.category_cols]=X_train[self.category_cols].astype('category')
                 y_train=pd.concat((y_train,test_y),axis=0)
                 sample_weight_train=np.ones(len(X_train))
 
@@ -1093,7 +1109,7 @@ class Yunbase():
                          raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                          sample_weight=sample_weight_train,
-                         categorical_feature=self.categoryname,
+                         categorical_feature=self.category_cols,
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
                     )
             elif 'cat' in model_name:
@@ -1102,14 +1118,15 @@ class Yunbase():
                     params=model.get_params()
                     if (params.get('task_type',-1)==-1):
                          raise ValueError("The 'task_type' of catboost must be 'GPU'.")
-                X_train[self.categoryname]=X_train[self.categoryname].astype('string')
-                X_valid[self.categoryname]=X_valid[self.categoryname].astype('string')
+                X_train[self.category_cols]=X_train[self.category_cols].astype('string')
+                X_valid[self.category_cols]=X_valid[self.category_cols].astype('string')
                 model.fit(X_train, y_train,
                       eval_set=(X_valid, y_valid),
-                      cat_features=self.categoryname,
+                      cat_features=self.category_cols,
                       sample_weight=sample_weight_train,
                       early_stopping_rounds=self.early_stop, verbose=log)
             elif 'xgb' in model_name:
+                
                 #gpu params isn't set
                 if self.device in ['cuda','gpu']:#gpu mode when training
                     params=model.get_params()
@@ -1154,10 +1171,7 @@ class Yunbase():
                 if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
                     origin_features=[]
                     for col in X_train.columns:
-                        try:#named 'col_1' when training
-                            origin_features.append(self.name2col[col])
-                        except:#tfidf feature
-                            origin_features.append(col)
+                        origin_features.append(col)
                             
                     feature_importance=model.feature_importances_
                     #convert to percentage
@@ -1236,7 +1250,7 @@ class Yunbase():
         #xgboost:https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/sklearn.py
         self.sample_weight=sample_weight
         #category_cols:Convert string columns to 'category'.
-        self.category_cols=category_cols
+        self.category_cols=self.colname_clean(category_cols)
         self.PrintColor("fit......",color=Fore.GREEN)
         self.PrintColor("load train data")
         self.load_data(path_or_file=train_path_or_file,mode='train')
@@ -1273,18 +1287,9 @@ class Yunbase():
             raise ValueError(f"shape of sample_weight must be {y.values.reshape(-1).shape}.")
         
         #special characters in columns'name will lead to errors when GBDT model training.
-        self.col2name={}
-        self.name2col={}
+      
         X_columns=list(X.columns)
-        for i in range(len(X_columns)):
-            self.col2name[X_columns[i]]=f'col_{i}'
-            self.name2col[f'col_{i}']=X_columns[i]
-        X=X.rename(columns=self.col2name)
-        self.categoryname=[self.col2name[col] for col in self.category_cols]
         print(f"feature_count:{len(X_columns)}")
-        
-        self.word2vec_colnames=[self.col2name[col] for col in self.word2vec_cols]
-        self.labelencoder_colnames=[self.col2name[col] for col in self.labelencoder_cols]
                 
         #classification:target2idx,idx2target
         if self.objective!='regression':
@@ -1488,7 +1493,6 @@ class Yunbase():
         self.PrintColor("Feature Engineer")
         self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
-        self.test=self.test.rename(columns=self.col2name)
         self.PrintColor("prediction on test data")
         if self.objective=='regression':
             test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
@@ -1498,7 +1502,7 @@ class Yunbase():
                 try:
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
                 except:#catboost
-                    test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
+                    test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
                 test_preds[cnt]=test_pred
                 cnt+=1
@@ -1519,7 +1523,7 @@ class Yunbase():
                     try:
                         test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     except:
-                        test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
+                        test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                         test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     test_preds[cnt]=test_pred
                     cnt+=1
@@ -1535,7 +1539,7 @@ class Yunbase():
                 try:
                     test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
                 except:
-                    test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
+                    test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                     test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
                 test_preds[cnt]=test_pred
                 cnt+=1   
@@ -1556,7 +1560,7 @@ class Yunbase():
                     try:
                         test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     except:
-                        test_copy[self.categoryname]=test_copy[self.categoryname].astype('string')
+                        test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                         test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     test_preds[fold]=test_pred
                     fold+=1
