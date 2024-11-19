@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/18
+@update_time:2024/11/19
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -503,7 +503,7 @@ class Yunbase():
                 except:
                     col_valuecounts=df[col].value_counts().to_dict()
                     new_col_valuecounts={}
-                    for k,v in zip(col_valuecounts['v'],col_valuecounts['count']):
+                    for k,v in zip(col_valuecounts[col],col_valuecounts['count']):
                         new_col_valuecounts[k]=v
                     col_valuecounts=new_col_valuecounts
                     self.onehot_valuecounts[col]=col_valuecounts
@@ -527,8 +527,9 @@ class Yunbase():
                 try:#if str(list),transform '[a,b]' to [a,b]
                     df[col]=df[col].apply(lambda x:ast.literal_eval(x))
                 except:#origin data is list or data can't be parsed.
-                    if not isinstance(df[col].dropna().values[0],list):
-                        raise ValueError(f"col '{col}' not a list.")
+                    #<class 'numpy.ndarray'> [10103]
+                    if not isinstance(list(df[col].dropna().values[0]),list):
+                        raise ValueError(f"col '{col}' is not a list.")
                 
                 #add index,data of list can groupby index.
                 df['index']=np.arange(len(df))
@@ -658,10 +659,13 @@ class Yunbase():
         df[num_cols]=df[num_cols].fillna(-1)
         return df  
     
-    def Metric(self,y_true:np.array,y_pred=np.array)->float:#for multi_class,labeland proability
+    def Metric(self,y_true:np.array,y_pred=np.array,weight=np.zeros(0))->float:#for multi_class,labeland proability
         #use cutom_metric when you define.
         if self.custom_metric!=None:
-            return self.custom_metric(y_true,y_pred)
+            if len(weight)!=0:
+                return self.custom_metric(y_true,y_pred,weight)
+            else:
+                return self.custom_metric(y_true,y_pred)
         if self.objective=='regression':
             if self.metric=='medae':
                 return np.median(np.abs(y_true-y_pred))
@@ -773,6 +777,8 @@ class Yunbase():
         
         if mode=='train':
             self.train=file.copy()
+            if len(self.train)<=self.one_hot_max:
+                raise ValueError(f"one_hot_max must less than {len(self.train)}")
         elif mode=='test':
             self.test=file.copy()
         else:#submission.csv
@@ -787,6 +793,7 @@ class Yunbase():
                                 category_cols:list[str]=[],
                                 use_seasonal_features:bool=True,
                                 weight_col:str='weight',
+                                use_weighted_metric:bool=False,
                                ):
         if self.use_pseudo_label:
             raise ValueError("purged CV can't support use pseudo label.")
@@ -878,7 +885,7 @@ class Yunbase():
                 train_fold=self.train.copy()[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
                 valid_fold=self.train.copy()[(self.train[self.date_col]>=test_date_min)&(self.train[self.date_col]<=test_date_max)]
                 X_train=train_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
-                train_weight=train_fold[self.weight_col]
+                train_weight,valid_weight=train_fold[self.weight_col],valid_fold[self.weight_col]
                 y_train=train_fold[self.target_col]
                 X_valid=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
                 y_valid=valid_fold[self.target_col]
@@ -983,14 +990,16 @@ class Yunbase():
                 if self.save_oof_preds:#if oof_preds is needed
                     np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",y_valid.values)
                     np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",valid_pred)
-                
-                CV_score.append(self.Metric(y_valid,valid_pred))
+                if use_weighted_metric:#only support custom_metric
+                    CV_score.append(self.Metric(y_valid,valid_pred,valid_weight))
+                else:
+                    CV_score.append(self.Metric(y_valid,valid_pred)) 
                 
                 del X_train,y_train,X_valid,y_valid,valid_pred
                 gc.collect()
-                
-                print(f"{self.metric}:{CV_score[-1]}")
-            self.PrintColor(f"mean_{self.metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
+                metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
+                print(f"{metric}:{CV_score[-1]}")
+            self.PrintColor(f"mean_{metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
         
         self.PrintColor("prediction on test data")
         train_date_min=self.train[self.date_col].max()-train_test_gap-train_date_range
@@ -1427,7 +1436,8 @@ class Yunbase():
         self.PrintColor("model training")
         for (model,model_name) in self.models:
             oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,kf_folds=kf_folds,model=model,model_name=model_name,sample_weight=self.sample_weight,use_optuna=False)
-            self.PrintColor(f"{self.metric}------------------------------>{metric_score}",color = Fore.RED)
+            metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
+            self.PrintColor(f"{metric}------------------------------>{metric_score}",color = Fore.RED)
         
             if self.save_oof_preds:#if oof_preds is needed
                 np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
@@ -1440,10 +1450,11 @@ class Yunbase():
                 oof_pred=np.load(self.model_save_path+f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
                 oof_preds+=weights[i]*oof_pred
             oof_preds=oof_preds/len(self.models)
+            metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
             if self.exp_mode:
-                print(f"final_{self.metric}:{self.Metric( np.expm1( self.target)-self.exp_mode_b,np.expm1( oof_preds)-self.exp_mode_b )}")
+                print(f"final_{metric}:{self.Metric( np.expm1( self.target)-self.exp_mode_b,np.expm1( oof_preds)-self.exp_mode_b )}")
             else:
-                print(f"final_{self.metric}:{self.Metric(self.target,oof_preds)}")
+                print(f"final_{metric}:{self.Metric(self.target,oof_preds)}")
 
     def predict_batch(self,model,test_X):
         test_preds=np.zeros((len(test_X)))
