@@ -65,6 +65,7 @@ yunbase=Yunbase(num_folds:int=5,
                       list_cols:list[str]=[],
                       list_gaps:list[int]=[1],
                       word2vec_models:list[tuple]=[],
+                      use_svd:bool=False,
                       text_cols:list[str]=[],
                       print_feature_importance:bool=False,
                       log:int=100,
@@ -136,6 +137,8 @@ yunbase=Yunbase(num_folds:int=5,
 
 - word2vec_models:<b>list</b>.Use models such as tfidf to extract features of string columns.For example:word2vec_models=[(TfidfVectorizer(),col,model_name)].
   
+- use_svd:<b>bool</b>.use truncated  singular value decomposition to word2vec features.
+  
 - text_cols:<b>list</b>.extract features of words, sentences, and paragraphs from text here.
 
 - print_feature_importance:<b>bool</b>.after model training,whether print feature importance or not.
@@ -151,16 +154,21 @@ yunbase=Yunbase(num_folds:int=5,
 At present, it supports read csv, parquet files according to path, or csv files that have already been read.
 
 ```python
-yunbase.fit(train_path_or_file='train.csv',
-            sample_weight=1,category_cols=[],
-            target2idx={}
+yunbase.fit(train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
+            sample_weight=1,category_cols:list[str]=[],
+            target2idx:dict|None=None,
            )
 ```
+
+- train_path_or_file:You can use the file path or pass in the already loaded file.
+- sample_weight:If you want to weight the samples, you can pass in a numpy.array of the same size as the training data.
+- category_cols:You can specify which columns to convert to 'category' in the training data.
+- target2idx:The dictionary mapped in the classification task, if you want to predict a person's gender, you can specify {'Male ': 0,' Female ': 1}.If you do not specify it yourself, it will be mapped to 0, 1,... n in order of the number of times each target appears.
 
 7.yunbase inference
 
 ```python
-test_preds=yunbase.predict(test_path_or_file='test.csv',weights=[3,4,3])
+test_preds=yunbase.predict(test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)
 ```
 
 - weights:This is setting the weights for model ensemble. For example, if you specify lgb, xgb, and cat, you can set weights to [3,4,3].
@@ -179,8 +187,6 @@ yunbase.submit(submission_path_or_file='submission.csv',test_preds=np.ones(3),sa
 yunbase.ensemble(solution_paths_or_files,weights=None)
 ```
 
-
-
 - For example:
 
   ```python
@@ -192,15 +198,21 @@ yunbase.ensemble(solution_paths_or_files,weights=None)
   weights=[3,3,4]
   ```
 
-
-
 10.If train and inference need to be separated.
 
-```
-yunbase.pickle_dump(yunbase,path='yunbase.model')
+```python
+#model save
+yunbase.pickle_dump(yunbase,'yunbase.model')
 
-yunbase1=Yunbase()
-yunbase=yunbase1.pickle_load('yunbase.model')
+import dill#serialize and deserialize objects (such as saving and loading tree models)
+def pickle_load(path):
+    #open path,binary read
+    with open(path, mode="rb") as f:
+        data = dill.load(f)
+        return data
+yunbase=Yunbase()
+yunbase=pickle_load("yunbase.model")
+yunbase.model_save_path=your_model_save_path
 ```
 
 11.train data and test data can be seen as below.
@@ -211,21 +223,22 @@ yunbase.train,yunbase.test
 
 ##### <a href="https://www.kaggle.com/code/yunsuxiaozi/yunbase">Here</a> is a static version that can be used to play Kaggle competition.You can refer to this <a href="https://www.kaggle.com/code/yunsuxiaozi/brist1d-yunbase">notebook</a> to learn usage of Yunbase. 
 
-## TimeSeries CV
+## TimeSeries Purged CV
 
 ```python
-yunbase.purged_cross_validation(train=train,test=test, 
-                                date_col='date',
-                                train_gap_each_fold=365,
-                                train_test_gap=31,
-                                train_date_range=0,
-                                test_date_range=0,
-                                category_cols=['warehouse'],
-                                weight_col='weight',
+yunbase.purged_cross_validation(
+    train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',                             test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',
+    date_col:str='date',train_gap_each_fold:int=31,#one month
+    train_test_gap:int=7,#a week
+    train_date_range:int=0,test_date_range:int=0,
+    category_cols:list[str]=[],
+    use_seasonal_features:bool=True,
+    weight_col:str='weight',
+    use_weighted_metric:bool=False,
                            ) 
 ```
 
-Demo notebook:<a href="https://www.kaggle.com/code/yunsuxiaozi/rohlik-yunbase">Rohlik Yunbase</a>
+Demo notebook:<a href="https://www.kaggle.com/code/yunsuxiaozi/rsfc-yunbase">Rohlik Yunbase</a>
 
 ### follow-up work
 
@@ -249,4 +262,4 @@ Waiting for updates.
 
 Kaggle:https://www.kaggle.com/yunsuxiaozi
 
- update time:2024/11/10(baseline.py and README may not synchronize updates)
+ update time:2024/11/20(baseline.py and README may not synchronize updates)
