@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/19
+@update_time:2024/11/20
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -469,9 +469,7 @@ class Yunbase():
                 self.list_cols+self.category_cols+self.drop_cols
                 ,axis=1,errors='ignore'
             ).columns:
-                #If it is a numerical type, one hot is generally not considered.
-                if (df[col].dtype==object) and (
-                    not (
+                if not (
                     #such as sin_month,month have already been onehot.
                     col.startswith('sin') or col.startswith('cos') or
                     #AGGREGATION don't use onehot.
@@ -483,8 +481,7 @@ class Yunbase():
                     #q0:0.05,q1:0.25,q2:0.5,q3:0.75,q4:0.95
                     col.endswith('_kurtosis') or col.endswith('_q0') or col.endswith('_q1') or
                     col.endswith('_q2') or col.endswith('_q3') or col.endswith('_q4')
-                    )
-                ):
+                    ):
                     if (df[col].nunique()<self.one_hot_max) and (df[col].nunique()>2):
                         self.one_hot_cols.append([col,list(df[col].value_counts().to_dict().keys())]) 
                     elif (self.one_hot_max>=2) and (df[col].nunique()==2):
@@ -660,6 +657,11 @@ class Yunbase():
         return df  
     
     def Metric(self,y_true:np.array,y_pred=np.array,weight=np.zeros(0))->float:#for multi_class,labeland proability
+        #due to the use of the reduce_mem function to reduce memory, it may result in over range after data addition.
+        if self.objective=='regression':
+            y_true,y_pred=y_true.astype(np.float64),y_pred.astype(np.float64)
+        else:
+            y_true,y_pred=y_true.astype(np.int64),y_pred.astype(np.float64)
         #use cutom_metric when you define.
         if self.custom_metric!=None:
             if len(weight)!=0:
@@ -784,6 +786,19 @@ class Yunbase():
         else:#submission.csv
             return file
 
+    def construct_seasonal_feature(self,df:pd.DataFrame,date_col:str='date'):
+        df['dayofyear']=df[date_col]%365
+        df['dayofweek']=df[date_col]%7
+        df['month']=df[date_col]%365//31
+        df['sin_dayofweek']=np.sin(2*np.pi*df['dayofweek']/7)
+        df['cos_dayofweek']=np.cos(2*np.pi*df['dayofweek']/7)
+        df['sin_day']=np.sin(2*np.pi*df['dayofyear']/365)
+        df['cos_day']=np.cos(2*np.pi*df['dayofyear']/365)
+        df['sin_month']=np.sin(2*np.pi*df['month']/12)
+        df['cos_month']=np.cos(2*np.pi*df['month']/12)
+
+        return df
+
     #https://www.kaggle.com/code/marketneutral/purged-time-series-cv-xgboost-optuna
     def purged_cross_validation(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
                                 test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',
@@ -846,26 +861,11 @@ class Yunbase():
         self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
         self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
 
+        #Considering that some competitions may anonymize time,
+        #the real year, month, and day features were not extracted here.
         if use_seasonal_features:
-            self.train['day']=self.train[self.date_col]%365
-            self.train['dayofweek']=self.train[self.date_col]%7
-            self.train['month']=self.train[self.date_col]%31
-            self.train['sin_dayofweek']=np.sin(2*np.pi*self.train['dayofweek']/7)
-            self.train['cos_dayofweek']=np.cos(2*np.pi*self.train['dayofweek']/7)
-            self.train['sin_day']=np.sin(2*np.pi*self.train['day']/365)
-            self.train['cos_day']=np.cos(2*np.pi*self.train['day']/365)
-            self.train['sin_month']=np.sin(2*np.pi*self.train['month']/31)
-            self.train['cos_month']=np.cos(2*np.pi*self.train['month']/31)
-    
-            self.test['day']=self.test[self.date_col]%365
-            self.test['dayofweek']=self.test[self.date_col]%7
-            self.test['month']=self.test[self.date_col]%31
-            self.test['sin_dayofweek']=np.sin(2*np.pi*self.test['dayofweek']/7)
-            self.test['cos_dayofweek']=np.cos(2*np.pi*self.test['dayofweek']/7)
-            self.test['sin_day']=np.sin(2*np.pi*self.test['day']/365)
-            self.test['cos_day']=np.cos(2*np.pi*self.test['day']/365)
-            self.test['sin_month']=np.sin(2*np.pi*self.test['month']/31)
-            self.test['cos_month']=np.cos(2*np.pi*self.test['month']/31)
+            self.train=self.construct_seasonal_feature(self.train,self.date_col)
+            self.test=self.construct_seasonal_feature(self.test,self.date_col)
         
         train_columns=list(self.train.columns)
         
