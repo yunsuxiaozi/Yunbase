@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/20
+@update_time:2024/11/21
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -179,12 +179,14 @@ class Yunbase():
         self.infer_size=infer_size
         if self.infer_size<=0 or type(self.infer_size) is not int:
             raise ValueError("infer size must be greater than 0 and must be int.")  
+        
         self.save_oof_preds=save_oof_preds
         if self.save_oof_preds not in [True,False]:
             raise ValueError("save_oof_preds must be True or False.")  
         self.save_test_preds=save_test_preds
         if self.save_test_preds not in [True,False]:
             raise ValueError("save_test_preds must be True or False.")
+
         self.num_classes=num_classes
         self.device=device.lower()
         if (self.objective=='binary') and self.num_classes!=2:
@@ -203,6 +205,8 @@ class Yunbase():
                         'logloss','multi_logloss'#classification
                        ]
         }
+
+        
         if (self.use_optuna_find_params) and (self.custom_metric!=None) and self.optuna_direction not in ['minimize','maximize']:
             raise ValueError("optuna_direction must be 'minimize' or 'maximize'.")
         self.early_stop=early_stop
@@ -213,6 +217,7 @@ class Yunbase():
         self.labelencoder_cols=self.colname_clean(labelencoder_cols)
         self.list_cols=self.colname_clean(list_cols)
         self.list_gaps=sorted(list_gaps)
+        
         self.word2vec_models=word2vec_models
         self.use_svd=use_svd
         self.word2vec_cols=[]#origin cols that need to use in tfidf model.
@@ -222,6 +227,9 @@ class Yunbase():
         #they cannot be directly passed into the LGB model training, so conversion is required
         self.log=log
         self.exp_mode=exp_mode
+        #when log transform, it is necessary to ensure that the minimum value of the target is greater than 0.
+        #so target=target-min_target. b is -min_target.
+        self.exp_mode_b=0
         if self.exp_mode not in [True,False]:
             raise ValueError("exp_mode must be True or False.")  
         if (self.objective!='regression') and (self.exp_mode==True):
@@ -229,9 +237,6 @@ class Yunbase():
         self.use_reduce_memory=use_reduce_memory
         if self.use_reduce_memory not in [True,False]:
             raise ValueError("use_reduce_memory must be True or False.")  
-        #when log transform, it is necessary to ensure that the minimum value of the target is greater than 0.
-        #so target=target-min_target. b is -min_target.
-        self.exp_mode_b=0
         
         #common AGGREGATIONS
         self.AGGREGATIONS = AGGREGATIONS
@@ -252,7 +257,26 @@ class Yunbase():
         self.eps=1e-15#clip (eps,1-eps) | divide by zero.
         self.category_cols=[]
         self.weight_col='weight'#weight_col purged_CV
-          
+
+    def get_params(self,):        
+        params_dict={'num_folds':self.num_folds,'seed':self.seed,'nan_margin':self.nan_margin,
+                     'models':self.models,'objective':self.objective,
+                     'metric':self.metric,'custom_metric':self.custom_metric,
+                     'drop_cols':self.drop_cols,'group_col':self.group_col,'num_classes':self.num_classes,
+                     'target_col':self.target_col,'infer_size':self.infer_size,'device':self.device,
+                     'cross_cols':self.cross_cols,'labelencoder_cols':self.labelencoder_cols,
+                     'list_cols':self.list_cols,'list_gaps':self.list_gaps,
+                     'word2vec_models':self.word2vec_models,'use_svd':self.use_svd,
+                     'text_cols':self.text_cols,'plot_feature_importance':self.plot_feature_importance,
+                     'save_oof_preds':self.save_oof_preds,'save_test_preds':self.save_test_preds,
+                     'one_hot_max':self.one_hot_max,'use_optuna_find_params':self.use_optuna_find_params,
+                     'optuna_direction':self.optuna_direction,'early_stop':self.early_stop,
+                     'use_pseudo_label':self.use_pseudo_label,'use_high_corr_feat':self.use_high_corr_feat,
+                     'log':self.log,'exp_mode':self.exp_mode,'use_reduce_memory':self.use_reduce_memory,
+                     'AGGREGATIONS':self.AGGREGATIONS,'category_cols':self.category_cols,
+              }
+        return params_dict
+    
     #print colorful text
     def PrintColor(self,text:str='',color = Fore.BLUE)->None:
         print(color + text + Style.RESET_ALL)
@@ -779,6 +803,8 @@ class Yunbase():
         
         if mode=='train':
             self.train=file.copy()
+            #if target_col is nan,then drop these data.
+            self.train=self.train[~self.train[self.target_col].isna()]
             if len(self.train)<=self.one_hot_max:
                 raise ValueError(f"one_hot_max must less than {len(self.train)}")
         elif mode=='test':
@@ -1656,7 +1682,6 @@ class Yunbase():
         if self.objective!='regression':
             if self.metric!='auc':
                 submission[self.target_col]=submission[self.target_col].apply(lambda x:self.idx2target[x])
-        #target is True and False
-        if self.target_dtype==bool:
-            submission[self.target_col]=submission[self.target_col].astype(bool)
+        #deal with bool.
+        submission[self.target_col]=submission[self.target_col].astype(self.target_dtype)
         submission.to_csv(f"{save_name}.csv",index=None)
