@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/21
+@update_time:2024/11/22
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -37,7 +37,7 @@ import ftfy#fixes text for you,correct unicode issues.
 import nltk #Natural Language toolkit
 from nltk.corpus import stopwords#import english stopwords
 import emoji#deal with emoji in natrual language
-from sklearn.decomposition import TruncatedSVD#Truncated Singular Value Decomposition
+from sklearn.decomposition import PCA,TruncatedSVD#Truncated Singular Value Decomposition
 
 import warnings#avoid some negligible errors
 #The filterwarnings () method is used to set warning filters, which can control the output method and level of warning information.
@@ -84,6 +84,7 @@ class Yunbase():
                       log:int=100,
                       exp_mode:bool=False,
                       use_reduce_memory:bool=False,
+                      use_data_augmentation:bool=False,
                       AGGREGATIONS:list=['nunique','count','min','max','first',
                                            'last', 'mean','median','sum','std','skew',kurtosis],
                 )->None:
@@ -129,6 +130,8 @@ class Yunbase():
         exp_mode              :In regression tasks, the distribution of target_col is a long tail distribution, 
                                and this parameter can be used to perform log transform on the target_col.
         use_reduce_memory     :if use function reduce_mem_usage(),then set this parameter True.
+        use_data_augmentation :if use data augmentation,During cross validation, the training data 
+                               will undergo PCA transformation followed by inverse transformation.
         cross_cols            :Construct features for adding, subtracting, multiplying, and dividing these columns.
         AGGREGATIONS          :['nunique','count','min','max','first','last',
                                'mean','median','sum','std','skew',kurtosis,q1,q3],
@@ -205,7 +208,6 @@ class Yunbase():
                         'logloss','multi_logloss'#classification
                        ]
         }
-
         
         if (self.use_optuna_find_params) and (self.custom_metric!=None) and self.optuna_direction not in ['minimize','maximize']:
             raise ValueError("optuna_direction must be 'minimize' or 'maximize'.")
@@ -237,6 +239,9 @@ class Yunbase():
         self.use_reduce_memory=use_reduce_memory
         if self.use_reduce_memory not in [True,False]:
             raise ValueError("use_reduce_memory must be True or False.")  
+        self.use_data_augmentation=use_data_augmentation
+        if self.use_data_augmentation not in [True,False]:
+            raise ValueError("use_data_augmentation must be True or False.")  
         
         #common AGGREGATIONS
         self.AGGREGATIONS = AGGREGATIONS
@@ -835,7 +840,20 @@ class Yunbase():
                                 use_seasonal_features:bool=True,
                                 weight_col:str='weight',
                                 use_weighted_metric:bool=False,
+                                only_inference:bool=False,
                                ):
+        """
+        train_path_or_file/test_path_or_file:your train and test dataset.
+        date_col                            :timestamp column
+        train_gap_each_fold                 :For example,the start time of fold 0 is 0,
+                                             the start time of fold 1 is 31.
+        train_test_gap                      :the gap between the end of train dataset 
+                                             and the start of test dataset.
+        train_date_range                    :the days of data are included in the train data.
+        test_date_range                     :the days of data are included in the test data.
+        category_cols                       :You can define features that are category_cols.
+        """
+        
         if self.use_pseudo_label:
             raise ValueError("purged CV can't support use pseudo label.")
         if self.group_col!=None:
@@ -895,138 +913,139 @@ class Yunbase():
         
         train_columns=list(self.train.columns)
         
-        self.PrintColor("purged CV")
-        for (model,model_name) in self.models:
-            print(f"{model_name}_params={model.get_params()}")
-        for model,model_name in self.models:
-            CV_score=[]
-            for fold in range(self.num_folds):
-                print(f"fold {fold},model_name:{model_name}")
-                train_date_min=fold*train_gap_each_fold
-                train_date_max=train_date_min+train_date_range
-                test_date_min=train_date_max+train_test_gap
-                test_date_max=test_date_min+test_date_range
-                print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
-                print(f"test_date_min:{test_date_min},test_date_max:{test_date_max}")
-                train_fold=self.train.copy()[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
-                valid_fold=self.train.copy()[(self.train[self.date_col]>=test_date_min)&(self.train[self.date_col]<=test_date_max)]
-                X_train=train_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
-                train_weight,valid_weight=train_fold[self.weight_col],valid_fold[self.weight_col]
-                y_train=train_fold[self.target_col]
-                X_valid=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
-                y_valid=valid_fold[self.target_col]
-
-                X_train=self.CV_FE(X_train,mode='train',fold=fold)
-                X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
-
-                if self.exp_mode:#use log transform for target_col
-                    self.exp_mode_b=-y_train.min()
-                    y_train=np.log1p(y_train+self.exp_mode_b)
-                
-                #don't use early_stop,because final_trainset don't have valid_set.
-                if 'lgb' in model_name:
-                     #gpu params isn't set
-                    if self.device in ['cuda','gpu']:#gpu mode when training
-                        params=model.get_params()
-                        if (params.get('device',-1)==-1) or (params.get('gpu_use_dp',-1)==-1):
-                             raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
-                    model.fit(X_train, y_train,eval_set=[(X_valid, y_valid)],
-                              sample_weight=train_weight,
-                              callbacks=[log_evaluation(self.log)])
-                elif 'xgb' in model_name:
-                    #gpu params isn't set
-                    if self.device in ['cuda','gpu']:#gpu mode when training
-                        params=model.get_params()
-                        if (params.get('tree_method',-1)!='gpu_hist'):
-                             raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
-                    model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
-                              sample_weight=train_weight,
-                              verbose=self.log)
-                elif 'cat' in model_name:
-                    #gpu params isn't set
-                    if self.device in ['cuda','gpu']:#gpu mode when training
-                        params=model.get_params()
-                        if (params.get('task_type',-1)==-1):
-                             raise ValueError("The 'task_type' of catboost must be 'GPU'.")
-                    X_train[self.category_cols]=X_train[self.category_cols].astype('string')
-                    X_valid[self.category_cols]=X_valid[self.category_cols].astype('string')
-                    model.fit(X_train,y_train, eval_set=(X_valid, y_valid),
-                              sample_weight=train_weight,
-                              cat_features=self.category_cols,
-                              verbose=self.log)
-                elif 'tabnet' in model_name:
-                    cat_idxs,cat_dims=[],[]
-                    X_train_columns=list(X_train.columns)
-                    for idx in range(len(X_train_columns)):
-                        if X_train[X_train_columns[idx]].dtype=='category':
-                            cat_idxs.append(idx)
-                            cat_dims.append(train[X_train_columns[idx]].nunique())
-                            X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)          
-                    params=model.get_params()
-                    params['cat_idxs']=cat_idxs
-                    params['cat_dims']=cat_dims
-                    params['cat_emb_dim']=[5]*len(cat_idxs)
-                    if self.objective=='regression':
-                        model=TabNetRegressor(**params)
-                        model.fit(
-                            X_train.to_numpy(), y_train.to_numpy().reshape(-1,1),
-                            eval_metric=['rmse'],
-                            batch_size=1024,
-                        )
-                    else:
-                        model=TabNetClassifier(**params)
-                        model.fit(
-                            X_train.to_numpy(), y_train.to_numpy(),
-                            batch_size=1024,
-                        )
-                else:
-                    model.fit(X_train,y_train)
-                #print feature importance when not use optuna to find params.
-                if self.plot_feature_importance:
-                    #can only support GBDT.
-                    if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
-                        origin_features=[]
-                        for col in X_train.columns:
-                            origin_features.append(col)
-                            
-                        feature_importance=model.feature_importances_
-                        #convert to percentage
-                        feature_importance=feature_importance/np.sum(feature_importance)
-                        feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
-                        feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
-                        self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold{fold}_feature_importance.pkl')
-                        bestk,worstk=min(10,int(len(origin_features)*0.1+1)),min(10,int(len(origin_features)*0.1+1))
-                        print(f"top{bestk} best features is :{list(feat_import_dict.keys())[:bestk]}")
-                        print(f"top{worstk} worst features is :{list(feat_import_dict.keys())[-worstk:]}")
+        if not only_inference:
+            self.PrintColor("purged CV")
+            for (model,model_name) in self.models:
+                print(f"{model_name}_params={model.get_params()}")
+            for model,model_name in self.models:
+                CV_score=[]
+                for fold in range(self.num_folds):
+                    print(f"fold {fold},model_name:{model_name}")
+                    train_date_min=fold*train_gap_each_fold
+                    train_date_max=train_date_min+train_date_range
+                    test_date_min=train_date_max+train_test_gap
+                    test_date_max=test_date_min+test_date_range
+                    print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
+                    print(f"test_date_min:{test_date_min},test_date_max:{test_date_max}")
+                    train_fold=self.train.copy()[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
+                    valid_fold=self.train.copy()[(self.train[self.date_col]>=test_date_min)&(self.train[self.date_col]<=test_date_max)]
+                    X_train=train_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
+                    train_weight,valid_weight=train_fold[self.weight_col],valid_fold[self.weight_col]
+                    y_train=train_fold[self.target_col]
+                    X_valid=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
+                    y_valid=valid_fold[self.target_col]
     
-                        #plot feature importance
-                        plt.figure(figsize = (12, 2*bestk/5))
-                        sns.barplot(
-                            y=list(feat_import_dict.keys())[:bestk],
-                            x=list(feat_import_dict.values())[:bestk],
-                        )
-                        plt.title(f"{model_name} fold {fold} top{bestk} best Feature Importance")
-                        plt.show()
-                if self.objective=='regression':
-                    valid_pred=self.predict_batch(model=model,test_X=X_valid)
-                else:
-                    valid_pred=self.predict_proba_batch(model=model,test_X=X_valid)
-                if self.exp_mode:
-                    valid_pred=np.expm1(valid_pred)-self.exp_mode_b
-                if self.save_oof_preds:#if oof_preds is needed
-                    np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",y_valid.values)
-                    np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",valid_pred)
-                if use_weighted_metric:#only support custom_metric
-                    CV_score.append(self.Metric(y_valid,valid_pred,valid_weight))
-                else:
-                    CV_score.append(self.Metric(y_valid,valid_pred)) 
-                
-                del X_train,y_train,X_valid,y_valid,valid_pred
-                gc.collect()
-                metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
-                print(f"{metric}:{CV_score[-1]}")
-            self.PrintColor(f"mean_{metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
+                    X_train=self.CV_FE(X_train,mode='train',fold=fold)
+                    X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
+    
+                    if self.exp_mode:#use log transform for target_col
+                        self.exp_mode_b=-y_train.min()
+                        y_train=np.log1p(y_train+self.exp_mode_b)
+                    
+                    #don't use early_stop,because final_trainset don't have valid_set.
+                    if 'lgb' in model_name:
+                         #gpu params isn't set
+                        if self.device in ['cuda','gpu']:#gpu mode when training
+                            params=model.get_params()
+                            if (params.get('device',-1)==-1) or (params.get('gpu_use_dp',-1)==-1):
+                                 raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
+                        model.fit(X_train, y_train,eval_set=[(X_valid, y_valid)],
+                                  sample_weight=train_weight,
+                                  callbacks=[log_evaluation(self.log)])
+                    elif 'xgb' in model_name:
+                        #gpu params isn't set
+                        if self.device in ['cuda','gpu']:#gpu mode when training
+                            params=model.get_params()
+                            if (params.get('tree_method',-1)!='gpu_hist'):
+                                 raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
+                        model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
+                                  sample_weight=train_weight,
+                                  verbose=self.log)
+                    elif 'cat' in model_name:
+                        #gpu params isn't set
+                        if self.device in ['cuda','gpu']:#gpu mode when training
+                            params=model.get_params()
+                            if (params.get('task_type',-1)==-1):
+                                 raise ValueError("The 'task_type' of catboost must be 'GPU'.")
+                        X_train[self.category_cols]=X_train[self.category_cols].astype('string')
+                        X_valid[self.category_cols]=X_valid[self.category_cols].astype('string')
+                        model.fit(X_train,y_train, eval_set=(X_valid, y_valid),
+                                  sample_weight=train_weight,
+                                  cat_features=self.category_cols,
+                                  verbose=self.log)
+                    elif 'tabnet' in model_name:
+                        cat_idxs,cat_dims=[],[]
+                        X_train_columns=list(X_train.columns)
+                        for idx in range(len(X_train_columns)):
+                            if X_train[X_train_columns[idx]].dtype=='category':
+                                cat_idxs.append(idx)
+                                cat_dims.append(train[X_train_columns[idx]].nunique())
+                                X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)          
+                        params=model.get_params()
+                        params['cat_idxs']=cat_idxs
+                        params['cat_dims']=cat_dims
+                        params['cat_emb_dim']=[5]*len(cat_idxs)
+                        if self.objective=='regression':
+                            model=TabNetRegressor(**params)
+                            model.fit(
+                                X_train.to_numpy(), y_train.to_numpy().reshape(-1,1),
+                                eval_metric=['rmse'],
+                                batch_size=1024,
+                            )
+                        else:
+                            model=TabNetClassifier(**params)
+                            model.fit(
+                                X_train.to_numpy(), y_train.to_numpy(),
+                                batch_size=1024,
+                            )
+                    else:
+                        model.fit(X_train,y_train)
+                    #print feature importance when not use optuna to find params.
+                    if self.plot_feature_importance:
+                        #can only support GBDT.
+                        if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
+                            origin_features=[]
+                            for col in X_train.columns:
+                                origin_features.append(col)
+                                
+                            feature_importance=model.feature_importances_
+                            #convert to percentage
+                            feature_importance=feature_importance/np.sum(feature_importance)
+                            feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
+                            feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
+                            self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold{fold}_feature_importance.pkl')
+                            bestk,worstk=min(10,int(len(origin_features)*0.1+1)),min(10,int(len(origin_features)*0.1+1))
+                            print(f"top{bestk} best features is :{list(feat_import_dict.keys())[:bestk]}")
+                            print(f"top{worstk} worst features is :{list(feat_import_dict.keys())[-worstk:]}")
         
+                            #plot feature importance
+                            plt.figure(figsize = (12, 2*bestk/5))
+                            sns.barplot(
+                                y=list(feat_import_dict.keys())[:bestk],
+                                x=list(feat_import_dict.values())[:bestk],
+                            )
+                            plt.title(f"{model_name} fold {fold} top{bestk} best Feature Importance")
+                            plt.show()
+                    if self.objective=='regression':
+                        valid_pred=self.predict_batch(model=model,test_X=X_valid)
+                    else:
+                        valid_pred=self.predict_proba_batch(model=model,test_X=X_valid)
+                    if self.exp_mode:
+                        valid_pred=np.expm1(valid_pred)-self.exp_mode_b
+                    if self.save_oof_preds:#if oof_preds is needed
+                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",y_valid.values)
+                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",valid_pred)
+                    if use_weighted_metric:#only support custom_metric
+                        CV_score.append(self.Metric(y_valid,valid_pred,valid_weight))
+                    else:
+                        CV_score.append(self.Metric(y_valid,valid_pred)) 
+                    
+                    del X_train,y_train,X_valid,y_valid,valid_pred
+                    gc.collect()
+                    metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
+                    print(f"{metric}:{CV_score[-1]}")
+                self.PrintColor(f"mean_{metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
+            
         self.PrintColor("prediction on test data")
         train_date_min=self.train[self.date_col].max()-train_test_gap-train_date_range
         train_date_max=self.train[self.date_col].max()-train_test_gap
@@ -1045,6 +1064,7 @@ class Yunbase():
         
         test_preds=[]
         for model,model_name in self.models:
+            X_train[self.category_cols]=X_train[self.category_cols].astype('category')
             #don't use early_stop,because final_trainset don't have valid_set.
             if 'lgb' in model_name:
                 model.fit(X_train, y_train,sample_weight=train_weight,
@@ -1086,14 +1106,16 @@ class Yunbase():
                         )
             else:
                 model.fit(X_train,y_train)
+
+            #inference
             if self.objective=='regression':
                 test_pred=self.predict_batch(model=model,test_X=test_X)
             else:
                 test_pred=self.predict_proba_batch(model=model,test_X=test_X)
             test_preds.append(test_pred)
-        test_preds=np.mean(test_preds,axis=0)
         if self.save_test_preds:#True
             np.save(self.model_save_path+'test_preds.npy',test_preds)
+        test_preds=np.mean(test_preds,axis=0)
         if self.objective!='regression':
             if self.metric=='auc':
                 test_preds=test_preds[:,1]
@@ -1123,7 +1145,6 @@ class Yunbase():
 
             X_train=self.CV_FE(X_train,mode='train',fold=fold)
             X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
-
             sample_weight_train=sample_weight[train_index]
             
             if (self.use_pseudo_label) and (type(self.test)==pd.DataFrame):
@@ -1136,6 +1157,20 @@ class Yunbase():
                 y_train=pd.concat((y_train,test_y),axis=0)
                 sample_weight_train=np.ones(len(X_train))
 
+            if self.use_data_augmentation:#X_train,y_train,sample_weight_train
+                origin_data=pd.concat((X_train,y_train),axis=1)
+                n_components=np.clip( int(origin_data.shape[1]*0.8),1,X_train.shape[1])
+                pca=PCA(n_components=n_components)
+                pca_data=pca.fit_transform(origin_data)
+                aug_data=pca.inverse_transform(pca_data)
+                aug_data=pd.DataFrame(aug_data)
+                aug_data.columns=list(X_train.columns)+[self.target_col]
+                #concat origin_data aug_data
+                X_train=pd.concat((X_train,aug_data[X_train.columns]),axis=0)
+                X_train[self.category_cols]=X_train[self.category_cols].astype('category')
+                y_train=pd.concat((y_train,y_train),axis=0)
+                sample_weight_train=np.concatenate((sample_weight_train,sample_weight_train),axis=0)
+    
             if 'lgb' in model_name:
                 #gpu params isn't set
                 if self.device in ['cuda','gpu']:#gpu mode when training
@@ -1484,26 +1519,32 @@ class Yunbase():
 
     def predict_batch(self,model,test_X):
         test_preds=np.zeros((len(test_X)))
-        cat_cols=[col for col in test_X.columns if str(test_X[col].dtype) in ['category','object','string']]
+        if 'catboost' in str(type(model)):#catboost
+            test_X[self.category_cols]=test_X[self.category_cols].astype('string')
+        else:
+            test_X[self.category_cols]=test_X[self.category_cols].astype('category')
         for idx in range(0,len(test_X),self.infer_size):
-            try:
-               test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size])
-            except:#NN such as tabnet 
-               for c in cat_cols:
+            if 'tabnet' in str(type(model)):
+                for c in self.category_cols:
                    test_X[c]=test_X[c].apply(lambda x:int(x)).astype(np.int32)     
-               test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
+                test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
+            else:   
+                test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size])  
         return test_preds
 
     def predict_proba_batch(self,model,test_X):
         test_preds=np.zeros((len(test_X),self.num_classes))
-        cat_cols=[col for col in test_X.columns if str(test_X[col].dtype) in ['category','object','string']]
+        if 'catboost' in str(type(model)):#catboost
+            test_X[self.category_cols]=test_X[self.category_cols].astype('string')
+        else:
+            test_X[self.category_cols]=test_X[self.category_cols].astype('category')
         for idx in range(0,len(test_X),self.infer_size):
-            try:
-                test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size])
-            except:#NN such as tabnet
-                for c in cat_cols:
+            if 'tabnet' in str(type(model)):
+                for c in self.category_cols:
                     test_X[c]=test_X[c].apply(lambda x:int(x)).astype(np.int32)     
                 test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size].to_numpy())
+            else:
+                test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size])
         return test_preds
     
     def predict(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)->np.array:
@@ -1543,6 +1584,8 @@ class Yunbase():
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
                 test_preds[cnt]=test_pred
                 cnt+=1
+            if self.save_test_preds:
+                np.save(self.model_save_path+'test_preds.npy',test_preds)
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             
             #use pseudo label
@@ -1564,6 +1607,8 @@ class Yunbase():
                         test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     test_preds[cnt]=test_pred
                     cnt+=1
+                if self.save_test_preds:
+                    np.save(self.model_save_path+'test_preds.npy',test_preds)
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             if self.exp_mode:
                 test_preds=np.expm1(test_preds)-self.exp_mode_b       
@@ -1579,7 +1624,9 @@ class Yunbase():
                     test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                     test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
                 test_preds[cnt]=test_pred
-                cnt+=1   
+                cnt+=1  
+            if self.save_test_preds:
+                np.save(self.model_save_path+'test_preds.npy',test_preds)
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
             
             #use pseudo label
@@ -1601,13 +1648,13 @@ class Yunbase():
                         test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     test_preds[fold]=test_pred
                     fold+=1
+                if self.save_test_preds:
+                    np.save(self.model_save_path+'test_preds.npy',test_preds)
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
+            self.PrintColor(f"idx2target={self.idx2target}",color=Fore.RED)
+            self.pickle_dump(self.idx2target,self.model_save_path+'idx2target.pkl')
             if self.metric=='auc':
                 return test_preds[:,1]
-            if self.save_test_preds:
-                self.PrintColor(f"idx2target={self.idx2target}",color=Fore.RED)
-                self.pickle_dump(self.idx2target,self.model_save_path+'idx2target.pkl')
-                np.save(self.model_save_path+'test_preds.npy',test_preds)
             test_preds=np.argmax(test_preds,axis=1)
             return test_preds
 
