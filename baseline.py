@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/22
+@update_time:2024/11/23
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -52,6 +52,7 @@ seed_everything(seed=2024)
 
 class Yunbase():
     def __init__(self,num_folds:int=5,
+                      n_repeats:int=1,
                       models:list[tuple]=[],
                       FE=None,
                       drop_cols:list[str]=[],
@@ -90,6 +91,8 @@ class Yunbase():
                 )->None:
         """
         num_folds             :the number of folds for k-fold cross validation.
+        n_repeats             :Here,we will modify the random seed of kfold and models to repeat 
+                               the cross validation several times.
         models                :Built in 3 GBDTs as baseline, you can also use custom models,
                                such as models=[(LGBMRegressor(**lgb_params),'lgb')]
         FE                    :In addition to the built-in feature engineer, you can also customize feature engineer.
@@ -156,6 +159,7 @@ class Yunbase():
         print(f"Currently supported objectives:{self.supported_objectives}")
         
         self.num_folds=num_folds
+        self.n_repeats=n_repeats
         self.seed=seed
         self.models=models
         self.FE=FE
@@ -261,6 +265,7 @@ class Yunbase():
 
         self.eps=1e-15#clip (eps,1-eps) | divide by zero.
         self.category_cols=[]
+        self.high_corr_cols=[]
         self.weight_col='weight'#weight_col purged_CV
 
     def get_params(self,):        
@@ -603,7 +608,7 @@ class Yunbase():
            
         if (mode=='train') and (self.use_high_corr_feat==False):#drop high correlation features
             print("< drop high correlation feature >")
-            self.drop_high_correlation_feats(df)
+            self.high_corr_cols=self.drop_high_correlation_feats(df)
        
         if len(self.cross_cols)!=0:
             print("< cross feature >")
@@ -615,7 +620,7 @@ class Yunbase():
                     df[self.cross_cols[i]+"/"+self.cross_cols[j]]=df[self.cross_cols[i]]/(df[self.cross_cols[j]]+self.eps)
         
         print("< drop useless cols >")
-        total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols
+        total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols+self.high_corr_cols
         total_drop_cols=[col for col in total_drop_cols if col not in \
                          self.word2vec_cols+self.labelencoder_cols+self.category_cols]
         df.drop(total_drop_cols,axis=1,inplace=True,errors='ignore')
@@ -624,28 +629,28 @@ class Yunbase():
         print("-"*30)
         return df
 
-    def label_encoder(self,df,label_encoder_cols,fold):
+    def label_encoder(self,df:pd.DataFrame,label_encoder_cols,fold:int=0,repeat:int=0):
         for col in label_encoder_cols:
             self.PrintColor(f"-> for column {col} labelencoder feature",color=Fore.RED)
             #load model when model is existed,fit when model isn't exist.
             try:
-                le=self.trained_le[f'le_{col}_fold{fold}.model']
+                le=self.trained_le[f'le_{col}_repeat{repeat}_fold{fold}.model']
             except:#training
                 value=df[col].value_counts().to_dict()
                 le={}
                 for k,v in value.items():
                     le[k]=len(le)
-                self.pickle_dump(le,self.model_save_path+f'le_{col}_fold{fold}.model')
-                self.trained_le[f'le_{col}_fold{fold}.model']=copy.deepcopy(le)
+                self.pickle_dump(le,self.model_save_path+f'le_{col}_repeat{repeat}_fold{fold}.model')
+                self.trained_le[f'le_{col}_repeat{repeat}_fold{fold}.model']=copy.deepcopy(le)
             df[col] = df[col].apply(lambda x:le.get(x,0))
         return df
     
     #Feature engineering that needs to be done internally in cross validation.
-    def CV_FE(self,df:pd.DataFrame,mode:str='train',fold:int=0)->pd.DataFrame:
+    def CV_FE(self,df:pd.DataFrame,mode:str='train',fold:int=0,repeat:int=0)->pd.DataFrame:
         #labelencoder
         if len(self.labelencoder_cols):
             print("< label encoder >")
-            df=self.label_encoder(df,label_encoder_cols=self.labelencoder_cols,fold=fold)
+            df=self.label_encoder(df,label_encoder_cols=self.labelencoder_cols,fold=fold,repeat=repeat)
 
         if len(self.word2vec_models):
             print("< word2vec >")
@@ -654,22 +659,22 @@ class Yunbase():
                 df[col]=df[col].fillna('nan')
                 #load when model is existed.fit when model isn't existed.
                 try:
-                    word2vec=self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]
+                    word2vec=self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]
                 except:
                     word2vec.fit(df[col].apply( lambda x: self.clean_text(x)  )  )
-                    self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_fold{fold}.model') 
-                    self.trained_wordvec[f'{model_name}_{col}_fold{fold}.model' ]=copy.deepcopy(word2vec)
+                    self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}.model') 
+                    self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]=copy.deepcopy(word2vec)
                 word2vec_feats=word2vec.transform(df[col].apply(lambda x: self.clean_text(x)  )).toarray()
 
                 if self.use_svd:
                     try:
-                        svd=self.trained_svd[f'{model_name}_svd_{col}_fold{fold}.model']
+                        svd=self.trained_svd[f'{model_name}_svd_{col}_repeat{repeat}_fold{fold}.model']
                     except:
                         svd = TruncatedSVD(n_components=word2vec_feats.shape[1]//3+1,
                                             n_iter=10, random_state=self.seed)
                         svd.fit(word2vec_feats)
-                        self.trained_svd[f'{model_name}_svd_{col}_fold{fold}.model']=copy.deepcopy(svd)
-                        self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_svd_{col}_fold{fold}.model') 
+                        self.trained_svd[f'{model_name}_svd_{col}_repeat{repeat}_fold{fold}.model']=copy.deepcopy(svd)
+                        self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_svd_{col}_repeat{repeat}_fold{fold}.model') 
                     word2vec_feats=svd.transform(word2vec_feats)
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
@@ -1042,6 +1047,8 @@ class Yunbase():
                     
                     del X_train,y_train,X_valid,y_valid,valid_pred
                     gc.collect()
+                    if 'tabnet' not in model_name:
+                        self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}.model')
                     metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
                     print(f"{metric}:{CV_score[-1]}")
                 self.PrintColor(f"mean_{metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
@@ -1106,7 +1113,7 @@ class Yunbase():
                         )
             else:
                 model.fit(X_train,y_train)
-
+            self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{self.num_folds}.model')
             #inference
             if self.objective=='regression':
                 test_pred=self.predict_batch(model=model,test_X=test_X)
@@ -1127,7 +1134,8 @@ class Yunbase():
     
     # return oof_preds and metric_score
     # can use optuna to find params.If use optuna,then not save models.
-    def cross_validation(self,X:pd.DataFrame,y:pd.DataFrame,group,kf_folds:pd.DataFrame,model,model_name,sample_weight,use_optuna):
+    def cross_validation(self,X:pd.DataFrame,y:pd.DataFrame,group,kf_folds:pd.DataFrame,
+                         model,model_name,sample_weight,use_optuna,repeat:int=0,):
         log=self.log
         if use_optuna:
             log=10000
@@ -1143,12 +1151,12 @@ class Yunbase():
             X_train, X_valid = X.iloc[train_index].reset_index(drop=True), X.iloc[valid_index].reset_index(drop=True)
             y_train, y_valid = y.iloc[train_index].reset_index(drop=True), y.iloc[valid_index].reset_index(drop=True)
 
-            X_train=self.CV_FE(X_train,mode='train',fold=fold)
-            X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
+            X_train=self.CV_FE(X_train,mode='train',fold=fold,repeat=repeat)
+            X_valid=self.CV_FE(X_valid,mode='test',fold=fold,repeat=repeat)
             sample_weight_train=sample_weight[train_index]
             
             if (self.use_pseudo_label) and (type(self.test)==pd.DataFrame):
-                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold)
+                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold,repeat=repeat)
                 test_X=test_copy.drop([self.group_col,self.target_col],axis=1,errors='ignore')
                 test_y=test_copy[self.target_col]
                 #concat will transform 'category' to 'object'
@@ -1248,7 +1256,7 @@ class Yunbase():
                     feature_importance=feature_importance/np.sum(feature_importance)
                     feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
                     feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
-                    self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold{fold}_feature_importance.pkl')
+                    self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_repeat{repeat}_fold{fold}_feature_importance.pkl')
                     bestk,worstk=min(10,int(len(origin_features)*0.1+1)),min(10,int(len(origin_features)*0.1+1))
                     print(f"top{bestk} best features is :{list(feat_import_dict.keys())[:bestk]}")
                     print(f"top{worstk} worst features is :{list(feat_import_dict.keys())[-worstk:]}")
@@ -1274,7 +1282,7 @@ class Yunbase():
                     oof_preds[valid_index]=model.predict_proba(X_valid.to_numpy())
             if not use_optuna:#not find_params(training)
                 if 'tabnet' not in model_name:
-                    self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}.model')
+                    self.pickle_dump(model,self.model_save_path+f'{model_name}_repeat{repeat}_fold{fold}.model')
                 self.trained_models.append(copy.deepcopy(model))
             
             del X_train,y_train,X_valid,y_valid
@@ -1306,7 +1314,7 @@ class Yunbase():
                             drop_cols.append(numerical_cols[j])
         #add drop_cols to self.drop_cols,they will be dropped in the final part of the function base_FE.
         print(f"drop_cols={drop_cols}")
-        self.drop_cols+=drop_cols
+        return drop_cols
     
     def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
             sample_weight=1,category_cols:list[str]=[],
@@ -1332,18 +1340,6 @@ class Yunbase():
         print(f"train.shape:{self.train.shape}")
         self.PrintColor("Feature Engineer")
         self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
-        
-        #choose cross validation
-        if self.objective!='regression':
-            if self.group_col!=None:#group
-                kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
-            else:
-                kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
-        else:#regression
-            if self.group_col!=None:#group
-                kf=GroupKFold(n_splits=self.num_folds)
-            else:
-                kf=KFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
         
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
@@ -1383,10 +1379,6 @@ class Yunbase():
             group=None
         #save true label in train data to calculate final score  
         self.target=y.values
-
-        kf_folds=pd.DataFrame({"fold":np.zeros(len(y))})
-        for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
-            kf_folds['fold'][valid_index]=fold
         
         #if you don't use your own models,then use built-in models.
         self.PrintColor("load models")
@@ -1418,6 +1410,20 @@ class Yunbase():
                         }
             #find new params then use optuna
             if self.use_optuna_find_params:
+                #choose cross validation
+                if self.objective!='regression':
+                    if self.group_col!=None:#group
+                        kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
+                    else:
+                        kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
+                else:#regression
+                    if self.group_col!=None:#group
+                        kf=GroupKFold(n_splits=self.num_folds)
+                    else:
+                        kf=KFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
+                kf_folds=pd.DataFrame({"fold":np.zeros(len(y))})
+                for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
+                    kf_folds['fold'][valid_index]=fold
                 lgb_params=self.optuna_lgb(X=X,y=y,group=group,kf_folds=kf_folds,metric=metric)
              
             #catboost's metric
@@ -1490,32 +1496,57 @@ class Yunbase():
                              (CatBoostClassifier(**cat_params),'cat'),
                              (XGBClassifier(**xgb_params),'xgb'),
                             ]
+
+        for repeat in range(self.n_repeats):
+            #choose cross validation
+            if self.objective!='regression':
+                if self.group_col!=None:#group
+                    kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
+                else:
+                    kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
+            else:#regression
+                if self.group_col!=None:#group
+                    kf=GroupKFold(n_splits=self.num_folds)
+                else:
+                    kf=KFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
+            kf_folds=pd.DataFrame({"fold":np.zeros(len(y))})
+            for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
+                kf_folds['fold'][valid_index]=fold
                 
-        for (model,model_name) in self.models:
-            print(f"{model_name}_params={model.get_params()}")
-        
-        self.PrintColor("model training")
-        for (model,model_name) in self.models:
-            oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,kf_folds=kf_folds,model=model,model_name=model_name,sample_weight=self.sample_weight,use_optuna=False)
-            metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
-            self.PrintColor(f"{metric}------------------------------>{metric_score}",color = Fore.RED)
-        
-            if self.save_oof_preds:#if oof_preds is needed
-                np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{self.num_folds}.npy",oof_preds)
+            #check params and update
+            for i in range(len(self.models)):
+                model,model_name=self.models[i]
+                if 'lgb' in model_name or 'xgb' in model_name or 'cat' in model_name:
+                    params=model.get_params()
+                    params['random_state']=self.seed+repeat
+                    model.set_params(**params)
+                self.models[i]=(model,model_name)
+                print(f"{self.models[i][1]}_params:{self.models[i][0].get_params()}")  
+                
+            self.PrintColor("model training")
+            for (model,model_name) in self.models:
+                oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,repeat=repeat,kf_folds=kf_folds,
+                                                             model=copy.deepcopy(model),model_name=model_name,sample_weight=self.sample_weight,use_optuna=False)
+                metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
+                self.PrintColor(f"{metric}------------------------------>{metric_score}",color = Fore.RED)
+            
+                if self.save_oof_preds:#if oof_preds is needed
+                    np.save(self.model_save_path+f"{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}.npy",oof_preds)
 
     def cal_final_score(self,weights):
         #calculate oof score if save_oof_preds
         if self.save_oof_preds:
-            oof_preds=np.zeros_like(np.load(self.model_save_path+f"{self.models[0//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy"))
-            for i in range(0,len(weights),self.num_folds):
-                oof_pred=np.load(self.model_save_path+f"{self.models[i//self.num_folds][1]}_seed{self.seed}_fold{self.num_folds}.npy")
-                oof_preds+=weights[i]*oof_pred
-            oof_preds=oof_preds/len(self.models)
-            metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
-            if self.exp_mode:
-                print(f"final_{metric}:{self.Metric( np.expm1( self.target)-self.exp_mode_b,np.expm1( oof_preds)-self.exp_mode_b )}")
-            else:
-                print(f"final_{metric}:{self.Metric(self.target,oof_preds)}")
+            for repeat in range(self.n_repeats):
+                oof_preds=np.zeros_like(np.load(self.model_save_path+f"{self.models[0//self.num_folds][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}.npy"))
+                for i in range(0,len(weights)//self.n_repeats,self.num_folds):
+                    oof_pred=np.load(self.model_save_path+f"{self.models[i//self.num_folds][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}.npy")
+                    oof_preds+=weights[i+repeat*self.num_folds]*oof_pred
+                oof_preds=oof_preds/len(self.models)
+                metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
+                if self.exp_mode:
+                    print(f"final_repeat{repeat}_{metric}:{self.Metric( np.expm1( self.target)-self.exp_mode_b,np.expm1( oof_preds)-self.exp_mode_b )}")
+                else:
+                    print(f"final_repeat{repeat}_{metric}:{self.Metric(self.target,oof_preds)}")
 
     def predict_batch(self,model,test_X):
         test_preds=np.zeros((len(test_X)))
@@ -1557,9 +1588,9 @@ class Yunbase():
         if len(weights)!=n:
             raise ValueError(f"length of weights must be {len(self.models)}.")
         self.PrintColor("weight normalization")
-        weights=np.array([w for w in weights for f in range(self.num_folds)],dtype=np.float32)
+        weights=np.array([w for w in weights for f in range(self.num_folds) for r in range(self.n_repeats)],dtype=np.float32)
         #normalization
-        weights=weights*(self.num_folds*n)/np.sum(weights)
+        weights=weights*(self.num_folds*self.n_repeats*n)/np.sum(weights)
 
         #calculate oof score if save_oof_preds
         self.cal_final_score(weights)
@@ -1573,10 +1604,10 @@ class Yunbase():
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         self.PrintColor("prediction on test data")
         if self.objective=='regression':
-            test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
+            test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test)))
             cnt=0
             for idx in range(len(self.trained_models)): 
-                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
+                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
                 try:
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
                 except:#catboost
@@ -1596,10 +1627,10 @@ class Yunbase():
                 #calculate oof score if save_oof_preds
                 self.cal_final_score(weights)
                 
-                test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test)))
+                test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test)))
                 cnt=0
                 for idx in range(len(self.trained_models)):
-                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
+                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds))
                     try:
                         test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     except:
@@ -1614,10 +1645,10 @@ class Yunbase():
                 test_preds=np.expm1(test_preds)-self.exp_mode_b       
             return test_preds
         else:#classification 
-            test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
+            test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
             cnt=0
             for idx in range(len(self.trained_models)):
-                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
+                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds))
                 try:
                     test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
                 except:
@@ -1633,14 +1664,14 @@ class Yunbase():
             if self.use_pseudo_label:
                 self.test[self.target_col]=np.argmax(test_preds,axis=1)
                 self.trained_models=[]
-                self.fit(self.train_path_or_file,self.sample_weight,self.category_cols)
+                self.fit(self.train_path_or_file,self.sample_weight,self.category_cols,self.target2idx)
                 #calculate oof score if save_oof_preds
                 self.cal_final_score(weights)
 
-                test_preds=np.zeros((len(self.models)*self.num_folds,len(self.test),self.num_classes))
+                test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
                 fold=0
                 for idx in range(len(self.trained_models)):
-                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds)
+                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds, repeat=idx//(len(self.models)*self.num_folds))
                     try:
                         test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
                     except:
@@ -1662,6 +1693,7 @@ class Yunbase():
         self.save_test_preds=True
         test_preds=self.predict(test_path_or_file,weights)
         test_proba=np.load(self.model_save_path+'test_preds.npy')
+        test_proba=test_proba.mean(axis=0)
         return test_proba
         
     #ensemble some solutions.
