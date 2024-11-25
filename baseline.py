@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/23
+@update_time:2024/11/25
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -503,7 +503,7 @@ class Yunbase():
                 self.list_cols+self.category_cols+self.drop_cols
                 ,axis=1,errors='ignore'
             ).columns:
-                if not (
+                if (df[col].dtype==object) and not (
                     #such as sin_month,month have already been onehot.
                     col.startswith('sin') or col.startswith('cos') or
                     #AGGREGATION don't use onehot.
@@ -868,7 +868,11 @@ class Yunbase():
         if (self.use_optuna_find_params!=0) or (self.optuna_direction!=None):
             raise ValueError("purged CV can't support optuna find params.")
         self.load_data(path_or_file=train_path_or_file,mode='train')
+        if len(self.train.dropna())==0:
+            raise ValueError("At least one row of train data must have no missing values.")
         self.load_data(path_or_file=test_path_or_file,mode='test')
+        if len(self.test.dropna())==0:
+            raise ValueError("At least one row of test data must have no missing values.")
         self.date_col=date_col
         self.weight_col=weight_col
         if self.weight_col not in list(self.train.columns):
