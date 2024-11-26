@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/25
+@update_time:2024/11/26
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -37,6 +37,7 @@ import ftfy#fixes text for you,correct unicode issues.
 import nltk #Natural Language toolkit
 from nltk.corpus import stopwords#import english stopwords
 import emoji#deal with emoji in natrual language
+from sklearn.preprocessing import RobustScaler#(x-median)/IQR
 from sklearn.decomposition import PCA,TruncatedSVD#Truncated Singular Value Decomposition
 
 import warnings#avoid some negligible errors
@@ -86,6 +87,7 @@ class Yunbase():
                       exp_mode:bool=False,
                       use_reduce_memory:bool=False,
                       use_data_augmentation:bool=False,
+                      use_scaler:bool=False,
                       AGGREGATIONS:list=['nunique','count','min','max','first',
                                            'last', 'mean','median','sum','std','skew',kurtosis],
                 )->None:
@@ -135,6 +137,7 @@ class Yunbase():
         use_reduce_memory     :if use function reduce_mem_usage(),then set this parameter True.
         use_data_augmentation :if use data augmentation,During cross validation, the training data 
                                will undergo PCA transformation followed by inverse transformation.
+        use_scaler            :use robust scaler to deal with outlier.
         cross_cols            :Construct features for adding, subtracting, multiplying, and dividing these columns.
         AGGREGATIONS          :['nunique','count','min','max','first','last',
                                'mean','median','sum','std','skew',kurtosis,q1,q3],
@@ -246,6 +249,9 @@ class Yunbase():
         self.use_data_augmentation=use_data_augmentation
         if self.use_data_augmentation not in [True,False]:
             raise ValueError("use_data_augmentation must be True or False.")  
+        self.use_scaler=use_scaler
+        if self.use_scaler not in [True,False]:
+            raise ValueError("use_scaler must be True or False.")
         
         #common AGGREGATIONS
         self.AGGREGATIONS = AGGREGATIONS
@@ -257,6 +263,7 @@ class Yunbase():
         self.trained_le={}
         self.trained_wordvec={}
         self.trained_svd={}
+        self.trained_scaler={}
         self.onehot_valuecounts={}
         #make folder to save model trained.such as GBDT,word2vec.
         self.model_save_path="Yunbase_info/"
@@ -491,8 +498,17 @@ class Yunbase():
         if mode=='train':
             #missing value 
             self.nan_cols=[col for col in df.columns if df[col].isna().mean()>self.nan_margin]
+            
             #nunique=1
-            self.unique_cols=[col for col in df.drop(self.drop_cols+self.list_cols+[self.weight_col],axis=1,errors='ignore').columns if(df[col].nunique()==1)]
+            self.unique_cols=[]
+            for col in df.drop(self.drop_cols+self.list_cols+\
+                               [self.weight_col],axis=1,errors='ignore').columns:
+                if(df[col].nunique()==1):
+                    self.unique_cols.append(col)
+                #max_value_counts's count
+                elif list(df[col].value_counts().to_dict().items())[0][1]>=len(df)*0.99:
+                    self.unique_cols.append(col)
+            
             #object dtype
             self.object_cols=[col for col in df.drop(self.drop_cols+self.category_cols,axis=1,errors='ignore').columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
             #one_hot_cols
@@ -624,8 +640,27 @@ class Yunbase():
         total_drop_cols=[col for col in total_drop_cols if col not in \
                          self.word2vec_cols+self.labelencoder_cols+self.category_cols]
         df.drop(total_drop_cols,axis=1,inplace=True,errors='ignore')
+
+        if self.use_scaler:
+            if mode=='train':
+                self.num_cols=[col for col in df.drop([self.target_col],axis=1).columns if str(df[col].dtype) not in ['object','category']]
+            print("< robust scaler >")
+            for col in self.num_cols:
+                try:
+                    scaler=self.trained_scaler[f'robustscaler_{col}.model']
+                except:
+                    scaler = RobustScaler(
+                            with_centering=True,with_scaling=True,
+                            quantile_range=(5.0,95.0),
+                        )
+                    scaler.fit(df[col].values.reshape(-1,1))
+                    self.pickle_dump(scaler,self.model_save_path+f'robustscaler_{col}.model')
+                    self.trained_scaler[f'robustscaler_{col}.model']=copy.deepcopy(scaler)
+                df[col] = scaler.transform(df[col].values.reshape(-1,1))
+                df[col]=df[col].clip(-5,5)
         if self.use_reduce_memory:
             df=self.reduce_mem_usage(df,float16_as32=True)
+        
         print("-"*30)
         return df
 
@@ -642,7 +677,7 @@ class Yunbase():
                     le[k]=len(le)
                 self.pickle_dump(le,self.model_save_path+f'le_{col}_repeat{repeat}_fold{fold}.model')
                 self.trained_le[f'le_{col}_repeat{repeat}_fold{fold}.model']=copy.deepcopy(le)
-            df[col] = df[col].apply(lambda x:le.get(x,0))
+            df[col] = df[col].apply(lambda x:le.get(x,0)) 
         return df
     
     #Feature engineering that needs to be done internally in cross validation.
@@ -687,7 +722,8 @@ class Yunbase():
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         #xgboost treat -1 as missing value.
         num_cols=[col for col in df.columns if str(df[col].dtype) not in ['category','object','string']]
-        df[num_cols]=df[num_cols].fillna(-1)
+        #when you use tabnet or LinearRegression.
+        df[num_cols]=df[num_cols].fillna(0)
         return df  
     
     def Metric(self,y_true:np.array,y_pred=np.array,weight=np.zeros(0))->float:#for multi_class,labeland proability
@@ -784,8 +820,9 @@ class Yunbase():
         #deal with json character
         json_char=',[]{}:"\\'
         for i in range(len(cols)):
-            for char in json_char:
-                cols[i]=cols[i].replace(char,'json')
+            if cols[i]!=self.target_col:
+                for char in json_char:
+                    cols[i]=cols[i].replace(char,'json')
         return cols
 
     def load_data(self,path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',mode:str='train')->None|pd.DataFrame:
