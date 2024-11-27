@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/26
+@update_time:2024/11/27
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -56,14 +56,14 @@ class Yunbase():
                       n_repeats:int=1,
                       models:list[tuple]=[],
                       FE=None,
+                      group_col=None,
+                      target_col:str='target',
                       drop_cols:list[str]=[],
                       seed:int=2024,
                       objective:str='regression',
                       metric:str='mse',
                       nan_margin:float=0.95,
-                      group_col=None,
                       num_classes=None,
-                      target_col:str='target',
                       infer_size:int=10000,
                       save_oof_preds:bool=True,
                       save_test_preds:bool=True,
@@ -165,6 +165,8 @@ class Yunbase():
         self.n_repeats=n_repeats
         self.seed=seed
         self.models=models
+        self.group_col=group_col
+        self.target_col=target_col
         self.FE=FE
         self.drop_cols=self.colname_clean(drop_cols)
         
@@ -184,8 +186,6 @@ class Yunbase():
         self.nan_margin=nan_margin
         if self.nan_margin<0 or self.nan_margin>1:
             raise ValueError("nan_margin must be within the range of 0 to 1.")
-        self.group_col=group_col
-        self.target_col=target_col
         self.infer_size=infer_size
         if self.infer_size<=0 or type(self.infer_size) is not int:
             raise ValueError("infer size must be greater than 0 and must be int.")  
@@ -503,11 +503,12 @@ class Yunbase():
             self.unique_cols=[]
             for col in df.drop(self.drop_cols+self.list_cols+\
                                [self.weight_col],axis=1,errors='ignore').columns:
-                if(df[col].nunique()==1):
+                if(df[col].nunique()<2):#maybe np.nan
                     self.unique_cols.append(col)
                 #max_value_counts's count
-                elif list(df[col].value_counts().to_dict().items())[0][1]>=len(df)*0.99:
-                    self.unique_cols.append(col)
+                elif len(list(df[col].value_counts().to_dict().items()))>0:
+                    if list(df[col].value_counts().to_dict().items())[0][1]>=len(df)*0.99:
+                        self.unique_cols.append(col)
             
             #object dtype
             self.object_cols=[col for col in df.drop(self.drop_cols+self.category_cols,axis=1,errors='ignore').columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
@@ -633,7 +634,7 @@ class Yunbase():
                     df[self.cross_cols[i]+"+"+self.cross_cols[j]]=df[self.cross_cols[i]]+df[self.cross_cols[j]]
                     df[self.cross_cols[i]+"-"+self.cross_cols[j]]=df[self.cross_cols[i]]-df[self.cross_cols[j]]
                     df[self.cross_cols[i]+"*"+self.cross_cols[j]]=df[self.cross_cols[i]]*df[self.cross_cols[j]]
-                    df[self.cross_cols[i]+"/"+self.cross_cols[j]]=df[self.cross_cols[i]]/(df[self.cross_cols[j]]+self.eps)
+                    df[self.cross_cols[i]+"_divide_"+self.cross_cols[j]]=df[self.cross_cols[i]]/(df[self.cross_cols[j]]+self.eps)
         
         print("< drop useless cols >")
         total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols+self.high_corr_cols
@@ -643,7 +644,9 @@ class Yunbase():
 
         if self.use_scaler:
             if mode=='train':
-                self.num_cols=[col for col in df.drop([self.target_col],axis=1).columns if str(df[col].dtype) not in ['object','category']]
+                #'/' will be considered as a path.
+                self.num_cols=[col for col in df.drop([self.target_col],axis=1).columns \
+                               if ( str(df[col].dtype) not in ['object','category'] ) and ('/' not in col)]
             print("< robust scaler >")
             for col in self.num_cols:
                 try:
