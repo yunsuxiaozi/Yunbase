@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/27
+@update_time:2024/11/30
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -32,6 +32,8 @@ import os#interact with operation system
 
 #deal with text
 import re#python's built-in regular expressions.
+#gene(topic) similarity   
+from gensim.models import Word2Vec
 from sklearn.feature_extraction.text import CountVectorizer,TfidfVectorizer#word2vec feature
 import ftfy#fixes text for you,correct unicode issues.
 import nltk #Natural Language toolkit
@@ -56,6 +58,7 @@ class Yunbase():
                       n_repeats:int=1,
                       models:list[tuple]=[],
                       FE=None,
+                      CV_sample=None,
                       group_col=None,
                       target_col:str='target',
                       drop_cols:list[str]=[],
@@ -98,6 +101,12 @@ class Yunbase():
         models                :Built in 3 GBDTs as baseline, you can also use custom models,
                                such as models=[(LGBMRegressor(**lgb_params),'lgb')]
         FE                    :In addition to the built-in feature engineer, you can also customize feature engineer.
+        CV_sample             :This function is for X_train and y_train,sample_weight in cross validation. 
+                               In order to make the evaluation metrics of oof as accurate as possible,
+                               this function is not executed for X_valid and y_valid. 
+                               You can perform downsampling, upsampling, taking the first 10000 data 
+                               points, and other operations you want here, and 
+                               ultimately return any X_train or y_train,sample_weight.
         drop_cols             :The column to be deleted after all feature engineering is completed.
         seed                  :random seed.
         objective             :what task do you want to do?regression,binary or multi_class?
@@ -168,6 +177,7 @@ class Yunbase():
         self.group_col=group_col
         self.target_col=target_col
         self.FE=FE
+        self.CV_sample=CV_sample
         self.drop_cols=self.colname_clean(drop_cols)
         
         self.objective=objective.lower()
@@ -255,7 +265,6 @@ class Yunbase():
         
         #common AGGREGATIONS
         self.AGGREGATIONS = AGGREGATIONS
-        self.sample_weight=1
         
         #If inference one batch of data at a time requires repeatedly loading the model,
         #it will increase the program's running time.we need to save  in dictionary when load.
@@ -597,8 +606,10 @@ class Yunbase():
                 df[f'{col}_len']=df[col].apply(len)
                 
                 for gcol in group_cols:
-                    df[f'{gcol}_ptp']=df[f'{gcol}_max']-df[f'{gcol}_min']
-                    df[f'{gcol}_mean/{gcol}_std']=df[f'{gcol}_mean']/(df[f'{gcol}_std']+self.eps)
+                    if (f'{gcol}_max' in df.columns) and (f'{gcol}_min' in df.columns):
+                        df[f'{gcol}_ptp']=df[f'{gcol}_max']-df[f'{gcol}_min']
+                    if (f'{gcol}_mean' in df.columns) and (f'{gcol}_std' in df.columns):
+                        df[f'{gcol}_mean_divide_{gcol}_std']=df[f'{gcol}_mean']/(df[f'{gcol}_std']+self.eps)
 
                 col_list=df[col].values
                 max_k=10
@@ -621,6 +632,7 @@ class Yunbase():
             self.word2vec_cols=[]
             for (model,col,model_name) in self.word2vec_models:
                 self.word2vec_cols.append(col)
+                df[col]=df[col].fillna('nan').apply( lambda x: self.clean_text(x)  )
             self.word2vec_cols=self.colname_clean(self.word2vec_cols)
            
         if (mode=='train') and (self.use_high_corr_feat==False):#drop high correlation features
@@ -694,15 +706,40 @@ class Yunbase():
             print("< word2vec >")
             for (word2vec,col,model_name) in self.word2vec_models:
                 self.PrintColor(f"-> for column {col} {model_name} word2vec feature",color=Fore.RED)
-                df[col]=df[col].fillna('nan')
-                #load when model is existed.fit when model isn't existed.
-                try:
-                    word2vec=self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]
-                except:
-                    word2vec.fit(df[col].apply( lambda x: self.clean_text(x)  )  )
-                    self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}.model') 
-                    self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]=copy.deepcopy(word2vec)
-                word2vec_feats=word2vec.transform(df[col].apply(lambda x: self.clean_text(x)  )).toarray()
+                #tfidf,countvec
+                if 'word2vec' not in model_name:
+                    #load when model is existed.fit when model isn't existed.
+                    try:
+                        word2vec=self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]
+                    except:
+                        word2vec.fit(df[col])
+                        self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}.model') 
+                        self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]=copy.deepcopy(word2vec)
+                    word2vec_feats=word2vec.transform(df[col]).toarray()
+                else:#word2vec from gensim  Word2Vec(vector_size=256, window=5, min_count=2, workers=16)
+                    texts=list(df[col].values)
+                    texts_split=[text.split() for text in texts]
+                    try:
+                        word2vec=self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]
+                    except:
+                        word2vec.build_vocab(texts_split)
+                        word2vec.train(texts_split, total_examples=word2vec.corpus_count,
+                                       epochs=word2vec.epochs)
+                        self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}.model') 
+                        self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]=copy.deepcopy(word2vec)
+                    #transform 
+                    word2vec_feats = []
+                    for text in texts:
+                        vector = np.zeros(word2vec.vector_size)
+                        count = 0
+                        for word in text:
+                            if word in word2vec.wv:#if word in word vocabulary
+                                vector += word2vec.wv[word]
+                                count += 1
+                        if count > 0:
+                            vector /= count
+                        word2vec_feats.append(vector)
+                    word2vec_feats=np.array(word2vec_feats)
 
                 if self.use_svd:
                     try:
@@ -799,7 +836,9 @@ class Yunbase():
                 model=LGBMRegressor(**params)
             else:
                 model=LGBMClassifier(**params)   
-            oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,kf_folds=kf_folds,model=model,model_name=model_name,sample_weight=self.sample_weight,use_optuna=True)
+            oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,kf_folds=kf_folds,
+                                                         model=model,model_name=model_name,
+                                                         sample_weight=self.sample_weight,use_optuna=True)
             return metric_score
         
         #direction is 'minimize' or 'maximize'
@@ -990,6 +1029,9 @@ class Yunbase():
                     if self.exp_mode:#use log transform for target_col
                         self.exp_mode_b=-y_train.min()
                         y_train=np.log1p(y_train+self.exp_mode_b)
+
+                    if self.CV_sample!=None:
+                        X_train,y_train,train_weight=self.CV_sample(X_train,y_train,train_weight)
                     
                     #don't use early_stop,because final_trainset don't have valid_set.
                     if 'lgb' in model_name:
@@ -1105,13 +1147,17 @@ class Yunbase():
         train_weight=train[self.weight_col]
         X_train=train.drop([self.target_col,self.date_col,self.weight_col],axis=1)
         y_train=train[self.target_col]
-        if self.exp_mode:#use log transform for target_col
-            self.exp_mode_b=-y_train.min()
-            y_train=np.log1p(y_train+self.exp_mode_b)
+        
         test_X=self.test.drop([self.date_col],axis=1)
 
         X_train=self.CV_FE(X_train,mode='train',fold=self.num_folds)
         test_X=self.CV_FE(test_X,mode='test',fold=self.num_folds)
+        if self.exp_mode:#use log transform for target_col
+            self.exp_mode_b=-y_train.min()
+            y_train=np.log1p(y_train+self.exp_mode_b)
+
+        if self.CV_sample!=None:
+            X_train,y_train,train_weight=self.CV_sample(X_train,y_train,train_weight)
         
         test_preds=[]
         for model,model_name in self.models:
@@ -1197,7 +1243,10 @@ class Yunbase():
 
             X_train=self.CV_FE(X_train,mode='train',fold=fold,repeat=repeat)
             X_valid=self.CV_FE(X_valid,mode='test',fold=fold,repeat=repeat)
-            sample_weight_train=sample_weight[train_index]
+            sample_weight_train=sample_weight.iloc[train_index].reset_index(drop=True)
+
+            if self.CV_sample!=None:
+                X_train,y_train,sample_weight_train=self.CV_sample(X_train,y_train,sample_weight_train)
             
             if (self.use_pseudo_label) and (type(self.test)==pd.DataFrame):
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold,repeat=repeat)
@@ -1361,7 +1410,7 @@ class Yunbase():
         return drop_cols
     
     def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
-            sample_weight=1,category_cols:list[str]=[],
+            weight_col='weight',category_cols:list[str]=[],
             target2idx:dict|None=None,
            ):
         if self.num_folds<2:#kfold must greater than 1
@@ -1370,12 +1419,16 @@ class Yunbase():
         self.use_custom_target2idx=(type(target2idx)==dict)
         #lightgbm:https://github.com/microsoft/LightGBM/blob/master/python-package/lightgbm/sklearn.py
         #xgboost:https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/sklearn.py
-        self.sample_weight=sample_weight
         #category_cols:Convert string columns to 'category'.
         self.category_cols=self.colname_clean(category_cols)
         self.PrintColor("fit......",color=Fore.GREEN)
         self.PrintColor("load train data")
         self.load_data(path_or_file=train_path_or_file,mode='train')
+        self.weight_col=weight_col
+        if self.weight_col not in self.train.columns:
+            self.train[self.weight_col]=1
+        self.sample_weight=self.train[self.weight_col]
+        self.train.drop([self.weight_col],axis=1,inplace=True)
         self.target_dtype=self.train[self.target_col].dtype
         try:#list_cols TypeError: unhashable type: 'list'
             self.train=self.train.drop_duplicates()
@@ -1390,14 +1443,8 @@ class Yunbase():
         if self.exp_mode:#use log transform for target_col
             self.exp_mode_b=-y.min()
             y=np.log1p(y+self.exp_mode_b)
-        if type(self.sample_weight)==int:#sample_weight=1,so no custom weights
-            self.sample_weight=np.ones(len(y))
-            
-        if self.sample_weight.shape!=y.values.reshape(-1).shape:
-            raise ValueError(f"shape of sample_weight must be {y.values.reshape(-1).shape}.")
         
         #special characters in columns'name will lead to errors when GBDT model training.
-      
         X_columns=list(X.columns)
         print(f"feature_count:{len(X_columns)}")
                 
@@ -1667,7 +1714,7 @@ class Yunbase():
             if self.use_pseudo_label:
                 self.test[self.target_col]=test_preds
                 self.trained_models=[]
-                self.fit(self.train_path_or_file,self.sample_weight,self.category_cols)
+                self.fit(self.train_path_or_file,self.weight_col,self.category_cols)
                 #calculate oof score if save_oof_preds
                 self.cal_final_score(weights)
                 
@@ -1708,7 +1755,7 @@ class Yunbase():
             if self.use_pseudo_label:
                 self.test[self.target_col]=np.argmax(test_preds,axis=1)
                 self.trained_models=[]
-                self.fit(self.train_path_or_file,self.sample_weight,self.category_cols,self.target2idx)
+                self.fit(self.train_path_or_file,self.weight_col,self.category_cols,self.target2idx)
                 #calculate oof score if save_oof_preds
                 self.cal_final_score(weights)
 

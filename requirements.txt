@@ -10,6 +10,7 @@ dill
 optuna
 colorama
 regex
+gensim
 scipy
 ftfy
 nltk
