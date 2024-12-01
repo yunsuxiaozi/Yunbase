@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/11/30
+@update_time:2024/12/01
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -720,21 +720,22 @@ class Yunbase():
                     texts=list(df[col].values)
                     texts_split=[text.split() for text in texts]
                     try:
-                        word2vec=self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]
+                        word2vec_copy=self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]
                     except:
-                        word2vec.build_vocab(texts_split)
-                        word2vec.train(texts_split, total_examples=word2vec.corpus_count,
-                                       epochs=word2vec.epochs)
-                        self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}.model') 
-                        self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]=copy.deepcopy(word2vec)
+                        word2vec_copy=copy.deepcopy(word2vec)
+                        word2vec_copy.build_vocab(texts_split)
+                        word2vec_copy.train(texts_split, total_examples=word2vec_copy.corpus_count,
+                                       epochs=word2vec_copy.epochs)
+                        self.pickle_dump(word2vec_copy,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}.model') 
+                        self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]=copy.deepcopy(word2vec_copy)
                     #transform 
                     word2vec_feats = []
                     for text in texts:
-                        vector = np.zeros(word2vec.vector_size)
+                        vector = np.zeros(word2vec_copy.vector_size)
                         count = 0
                         for word in text:
-                            if word in word2vec.wv:#if word in word vocabulary
-                                vector += word2vec.wv[word]
+                            if word in word2vec_copy.wv:#if word in word vocabulary
+                                vector += word2vec_copy.wv[word]
                                 count += 1
                         if count > 0:
                             vector /= count
