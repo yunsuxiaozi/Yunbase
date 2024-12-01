@@ -38,43 +38,51 @@ from Yunbase.baseline import Yunbase
 All the parameters are below, and you can flexibly choose parameters according to the task.
 
 ```python
-yunbase=Yunbase(num_folds:int=5,
-                      models:list[tuple]=[],
-                      FE=None,
-                      drop_cols:list[str]=[],
-                      seed:int=2024,
-                      objective:str='regression',
-                      metric:str='mse',
-                      nan_margin:float=0.95,
-                      group_col=None,
-                      num_classes=None,
-                      target_col:str='target',
-                      infer_size:int=10000,
-                      save_oof_preds:bool=True,
-                      save_test_preds:bool=True,
-                      device:str='cpu',
-                      one_hot_max:int=50,
-                      custom_metric=None,
-                      use_optuna_find_params:int=0,
-                      optuna_direction=None,
-                      early_stop:int=100,
-                      use_pseudo_label:bool=False,
-                      use_high_corr_feat:bool=True,
-                      cross_cols:list[str]=[],
-                      labelencoder_cols:list[str]=[],
-                      list_cols:list[str]=[],
-                      list_gaps:list[int]=[1],
-                      word2vec_models:list[tuple]=[],
-                      use_svd:bool=False,
-                      text_cols:list[str]=[],
-                      print_feature_importance:bool=False,
-                      log:int=100,
-                      exp_mode:bool=False,
-                      use_reduce_memory:bool=False,
-            )
+yunbase=Yunbase(  num_folds:int=5,
+                  n_repeats:int=1,
+                  models:list[tuple]=[],
+                  FE=None,
+                  CV_sample=None,
+                  group_col=None,
+                  target_col:str='target',
+                  drop_cols:list[str]=[],
+                  seed:int=2024,
+                  objective:str='regression',
+                  metric:str='mse',
+                  nan_margin:float=0.95,
+                  num_classes=None,
+                  infer_size:int=10000,
+                  save_oof_preds:bool=True,
+                  save_test_preds:bool=True,
+                  device:str='cpu',
+                  one_hot_max:int=50,
+                  custom_metric=None,
+                  use_optuna_find_params:int=0,
+                  optuna_direction=None,
+                  early_stop:int=100,
+                  use_pseudo_label:bool=False,
+                  use_high_corr_feat:bool=True,
+                  cross_cols:list[str]=[],
+                  labelencoder_cols:list[str]=[],
+                  list_cols:list[str]=[],
+                  list_gaps:list[int]=[1],
+                  word2vec_models:list[tuple]=[],
+                  use_svd:bool=False,
+                  text_cols:list[str]=[],
+                  plot_feature_importance:bool=False,
+                  log:int=100,
+                  exp_mode:bool=False,
+                  use_reduce_memory:bool=False,
+                  use_data_augmentation:bool=False,
+                  use_scaler:bool=False,
+                  AGGREGATIONS:list=['nunique','count','min','max','first',
+                                     'last','mean','median','sum','std','skew',kurtosis],
+    )
 ```
 
 - num_folds:<b>int</b>.the number of folds for k-fold cross validation.
+
+- n_repeats:<b>int</b>,Replace different seeds for multiple kfold cross validation.
 
 - models:<b>list of models</b>.Built in 3 GBDTs as baseline, you can also use custom models,such as models=[(LGBMRegressor(**lgb_params),'lgb')].
   
@@ -85,7 +93,29 @@ yunbase=Yunbase(num_folds:int=5,
          return df.drop(['id'],axis=1)
      ```
 
-     
+
+
+
+- CV_sample:<b>function</b>.You can customize your downsampling and oversampling operations inside.
+
+  For example:
+
+  ```python
+  def CV_sample(X_train,y_train,train_weight):
+      negative_idx=np.where(y_train==0)[0]
+      X_train_copy=X_train.iloc[negative_idx].copy()
+      y_train_copy=y_train.iloc[negative_idx].copy()
+      X_train=pd.concat((X_train,X_train_copy)).reset_index(drop=True)
+      y_train=pd.concat((y_train,y_train_copy)).reset_index(drop=True)
+      train_weight=pd.concat((train_weight,train_weight[negative_idx])).reset_index(drop=True)
+      return X_train,y_train,train_weight
+  ```
+
+  
+
+- group_col:<b>str</b>.if you want to use groupkfold,then define this group_col.
+
+- target_col:<b>str</b>.the column that you want to predict.
 
 - drop_cols:<b>list</b>.The column to be deleted after all feature engineering is completed.
 
@@ -97,11 +127,7 @@ yunbase=Yunbase(num_folds:int=5,
 
 - nan_margin:<b>float</b>.when the proportion of missing values in a column is greater than, we delete this column.
 
-- group_col:<b>str</b>.if you want to use groupkfold,then define this group_col.
-
 - num_classes:<b>int</b>.if objectibe is multi_class or binary,you should define this class.
-
-- target_col:<b>str</b>.the column that you want to predict.
 
 - infer_size:<b>int</b>.the test data might be large,we can predict in batches.
 
@@ -141,7 +167,7 @@ yunbase=Yunbase(num_folds:int=5,
   
 - text_cols:<b>list</b>.extract features of words, sentences, and paragraphs from text here.
 
-- print_feature_importance:<b>bool</b>.after model training,whether print feature importance or not.
+- plot_feature_importance:<b>bool</b>.after model training,whether print feature importance or not.
 
 - log:<b>int</b>.log trees are trained in the GBDT model to output a validation set score once.
 
@@ -149,19 +175,23 @@ yunbase=Yunbase(num_folds:int=5,
 
 - use_reduce_memory:<b>bool</b>.if use function reduce_mem_usage(),then set this parameter True.
 
+- use_data_augmentation:<b>bool</b>.if use data augmentation,During cross validation, the training data will undergo PCA transformation followed by inverse transformation.
+
+- use_scaler:<b>bool</b>.use robust scaler to deal with outlier.
+
 6.yunbase training
 
 At present, it supports read csv, parquet files according to path, or csv files that have already been read.
 
 ```python
 yunbase.fit(train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
-            sample_weight=1,category_cols:list[str]=[],
+            weight_col='weight',category_cols:list[str]=[],
             target2idx:dict|None=None,
            )
 ```
 
 - train_path_or_file:You can use the file path or pass in the already loaded file.
-- sample_weight:If you want to weight the samples, you can pass in a numpy.array of the same size as the training data.
+- weight_col:If you want to weight the samples, you can add a column with train_weight named weight_col.
 - category_cols:You can specify which columns to convert to 'category' in the training data.
 - target2idx:The dictionary mapped in the classification task, if you want to predict a person's gender, you can specify {'Male ': 0,' Female ': 1}.If you do not specify it yourself, it will be mapped to 0, 1,... n in order of the number of times each target appears.
 
@@ -221,22 +251,25 @@ yunbase.model_save_path=your_model_save_path
 yunbase.train,yunbase.test
 ```
 
-##### <a href="https://www.kaggle.com/code/yunsuxiaozi/yunbase">Here</a> is a static version that can be used to play Kaggle competition.You can refer to this <a href="https://www.kaggle.com/code/yunsuxiaozi/brist1d-yunbase">notebook</a> to learn usage of Yunbase. 
+##### <a href="https://www.kaggle.com/code/yunsuxiaozi/yunbase">Here</a> is a static version that can be used to play Kaggle competition.You can refer to this <a href="https://www.kaggle.com/code/yunsuxiaozi/pss4e12-yunbase-benchmark">notebook</a> to learn usage of Yunbase. 
 
 ## TimeSeries Purged CV
 
 ```python
-yunbase.purged_cross_validation(
-    train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',                             test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',
-    date_col:str='date',train_gap_each_fold:int=31,#one month
-    train_test_gap:int=7,#a week
-    train_date_range:int=0,test_date_range:int=0,
-    category_cols:list[str]=[],
-    use_seasonal_features:bool=True,
-    weight_col:str='weight',
-    use_weighted_metric:bool=False,
+yunbase.purged_cross_validation(train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
+                                test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',
+                                date_col:str='date',train_gap_each_fold:int=31,#one month
+                                train_test_gap:int=7,#a week
+                                train_date_range:int=0,test_date_range:int=0,
+                                category_cols:list[str]=[],
+                                use_seasonal_features:bool=True,
+                                weight_col:str='weight',
+                                use_weighted_metric:bool=False,
+                                only_inference:bool=False,
                            ) 
 ```
+
+- only_inference:If you don't want to see the offline scores of the time-series CV or want to save time, you can directly train the final submitted model.
 
 Demo notebook:<a href="https://www.kaggle.com/code/yunsuxiaozi/rsfc-yunbase">Rohlik Yunbase</a>
 
@@ -246,20 +279,20 @@ The code has now completed a rough framework and will continue to be improved by
 
 <b>In principle, fix as many bugs as I discover and add as many new features as I think of.</b>
 
-1.add kfold such as <b>repeat</b>kfold.
+1.fit function to <b>np.array</b>.(such as model.fit(train_X,train_y),model.predict(test_X))
 
-2.<b>Undersampling, oversampling</b>.
+2.add more common <b>metric</b>.
 
-3.fit function to <b>np.array</b>.(such as model.fit(train_X,train_y),model.predict(test_X))
+3.In addition to kfold, <b>single model</b> training and inference are also implemented.
 
-4.add more common <b>metric</b>.
+4.hill climbing to find <b>blending</b> weight.
 
-5.In addition to kfold, <b>single model</b> training and inference are also implemented.
+5.Optimize <b>memory</b> and <b>time</b> to cope with larger datasets.
 
-6.hill climbing to find <b>blending</b> weight.
+6.Make the code more beautiful, concise, and easy to understand.
 
 Waiting for updates.
 
 Kaggle:https://www.kaggle.com/yunsuxiaozi
 
- update time:2024/11/20(baseline.py and README may not synchronize updates)
+ update time:2024/12/01(baseline.py and README may not synchronize updates)
