@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/01
+@update_time:2024/12/03
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -90,6 +90,7 @@ class Yunbase():
                       exp_mode:bool=False,
                       use_reduce_memory:bool=False,
                       use_data_augmentation:bool=False,
+                      use_oof_as_feature:bool=False,
                       use_scaler:bool=False,
                       AGGREGATIONS:list=['nunique','count','min','max','first',
                                            'last', 'mean','median','sum','std','skew',kurtosis],
@@ -146,6 +147,8 @@ class Yunbase():
         use_reduce_memory     :if use function reduce_mem_usage(),then set this parameter True.
         use_data_augmentation :if use data augmentation,During cross validation, the training data 
                                will undergo PCA transformation followed by inverse transformation.
+        use_oof_as_feature    :Train the next model using the oof_preds obtained from the previous 
+                               model as features, and the same applies to inference.
         use_scaler            :use robust scaler to deal with outlier.
         cross_cols            :Construct features for adding, subtracting, multiplying, and dividing these columns.
         AGGREGATIONS          :['nunique','count','min','max','first','last',
@@ -201,11 +204,7 @@ class Yunbase():
             raise ValueError("infer size must be greater than 0 and must be int.")  
         
         self.save_oof_preds=save_oof_preds
-        if self.save_oof_preds not in [True,False]:
-            raise ValueError("save_oof_preds must be True or False.")  
         self.save_test_preds=save_test_preds
-        if self.save_test_preds not in [True,False]:
-            raise ValueError("save_test_preds must be True or False.")
 
         self.num_classes=num_classes
         self.device=device.lower()
@@ -249,19 +248,23 @@ class Yunbase():
         #when log transform, it is necessary to ensure that the minimum value of the target is greater than 0.
         #so target=target-min_target. b is -min_target.
         self.exp_mode_b=0
-        if self.exp_mode not in [True,False]:
-            raise ValueError("exp_mode must be True or False.")  
         if (self.objective!='regression') and (self.exp_mode==True):
             raise ValueError("exp_mode must be False in classification task.")
         self.use_reduce_memory=use_reduce_memory
-        if self.use_reduce_memory not in [True,False]:
-            raise ValueError("use_reduce_memory must be True or False.")  
         self.use_data_augmentation=use_data_augmentation
-        if self.use_data_augmentation not in [True,False]:
-            raise ValueError("use_data_augmentation must be True or False.")  
+        self.use_oof_as_feature=use_oof_as_feature
         self.use_scaler=use_scaler
-        if self.use_scaler not in [True,False]:
-            raise ValueError("use_scaler must be True or False.")
+
+        attritubes=['save_oof_preds','save_test_preds','exp_mode',
+                    'use_reduce_memory','use_data_augmentation','use_scaler',
+                    'use_oof_as_feature'
+                   ]
+        for attr in attritubes:
+            if getattr(self,attr) not in [True,False]:
+                raise ValueError(f"{attr} must be True or False.")
+
+        if self.use_oof_as_feature and self.use_pseudo_label:
+            raise ValueError(f"use_oof_as_feature and use_pseudo_label cannot be both True at the same time.")
         
         #common AGGREGATIONS
         self.AGGREGATIONS = AGGREGATIONS
@@ -766,8 +769,27 @@ class Yunbase():
         #when you use tabnet or LinearRegression.
         df[num_cols]=df[num_cols].fillna(0)
         return df  
+
+    def roc_auc_score(self,y_true:np.array,y_pro:np.array):
+        pos_idx=np.where(y_true==1)[0]
+        neg_idx=np.where(y_true==0)[0]
+        pos_pro=sorted(y_pro[pos_idx])
+        neg_pro=sorted(y_pro[neg_idx])
+        total_sample_cnt,greater_sample_cnt=len(pos_pro)*len(neg_pro),0
+        left,right=0,0
+        while left<len(pos_pro):
+            while right<len(neg_pro) and (pos_pro[left]>neg_pro[right]):
+                right+=1
+            if right<len(neg_pro):
+                greater_sample_cnt+=right
+                left+=1
+            else:#right>=len(neg_pro)
+                greater_sample_cnt+=len(neg_pro)*(len(pos_pro)-left)
+                left=len(pos_pro)
+        auc_score=greater_sample_cnt/total_sample_cnt
+        return auc_score
     
-    def Metric(self,y_true:np.array,y_pred=np.array,weight=np.zeros(0))->float:#for multi_class,labeland proability
+    def Metric(self,y_true:np.array,y_pred:np.array,weight=np.zeros(0))->float:#for multi_class,labeland proability
         #due to the use of the reduce_mem function to reduce memory, it may result in over range after data addition.
         if self.objective=='regression':
             y_true,y_pred=y_true.astype(np.float64),y_pred.astype(np.float64)
@@ -1006,27 +1028,26 @@ class Yunbase():
             self.PrintColor("purged CV")
             for (model,model_name) in self.models:
                 print(f"{model_name}_params={model.get_params()}")
-            for model,model_name in self.models:
+            for fold in range(self.num_folds):
+                print(f"fold {fold},model_name:{model_name}")
+                train_date_min=fold*train_gap_each_fold
+                train_date_max=train_date_min+train_date_range
+                test_date_min=train_date_max+train_test_gap
+                test_date_max=test_date_min+test_date_range
+                print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
+                print(f"test_date_min:{test_date_min},test_date_max:{test_date_max}")
+                train_fold=self.train.copy()[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
+                valid_fold=self.train.copy()[(self.train[self.date_col]>=test_date_min)&(self.train[self.date_col]<=test_date_max)]
+                X_train=train_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
+                train_weight,valid_weight=train_fold[self.weight_col],valid_fold[self.weight_col]
+                y_train=train_fold[self.target_col]
+                X_valid=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
+                y_valid=valid_fold[self.target_col]
+
+                X_train=self.CV_FE(X_train,mode='train',fold=fold)
+                X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
                 CV_score=[]
-                for fold in range(self.num_folds):
-                    print(f"fold {fold},model_name:{model_name}")
-                    train_date_min=fold*train_gap_each_fold
-                    train_date_max=train_date_min+train_date_range
-                    test_date_min=train_date_max+train_test_gap
-                    test_date_max=test_date_min+test_date_range
-                    print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
-                    print(f"test_date_min:{test_date_min},test_date_max:{test_date_max}")
-                    train_fold=self.train.copy()[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
-                    valid_fold=self.train.copy()[(self.train[self.date_col]>=test_date_min)&(self.train[self.date_col]<=test_date_max)]
-                    X_train=train_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
-                    train_weight,valid_weight=train_fold[self.weight_col],valid_fold[self.weight_col]
-                    y_train=train_fold[self.target_col]
-                    X_valid=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
-                    y_valid=valid_fold[self.target_col]
-    
-                    X_train=self.CV_FE(X_train,mode='train',fold=fold)
-                    X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
-    
+                for (model,model_name) in self.models:
                     if self.exp_mode:#use log transform for target_col
                         self.exp_mode_b=-y_train.min()
                         y_train=np.log1p(y_train+self.exp_mode_b)
@@ -1125,8 +1146,9 @@ class Yunbase():
                     if self.exp_mode:
                         valid_pred=np.expm1(valid_pred)-self.exp_mode_b
                     if self.save_oof_preds:#if oof_preds is needed
-                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",y_valid.values)
-                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}.npy",valid_pred)
+                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}_target.npy",y_valid.values)
+                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}_valid_pred.npy",valid_pred)
+                    
                     if use_weighted_metric:#only support custom_metric
                         CV_score.append(self.Metric(y_valid,valid_pred,valid_weight))
                     else:
@@ -1619,6 +1641,15 @@ class Yunbase():
             for (model,model_name) in self.models:
                 oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,repeat=repeat,kf_folds=kf_folds,
                                                              model=copy.deepcopy(model),model_name=model_name,sample_weight=self.sample_weight,use_optuna=False)
+                if self.use_oof_as_feature:
+                    if self.objective=='regression':
+                        X[f'{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_oof_preds']=oof_preds
+                        self.train[f'{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_oof_preds']=oof_preds
+                    else:
+                        for c in range(self.num_classes):
+                            X[f'{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_oof_preds_class{c}']=oof_preds[:,c]
+                            self.train[f'{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_oof_preds_class{c}']=oof_preds[:,c]
+
                 metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
                 self.PrintColor(f"{metric}------------------------------>{metric_score}",color = Fore.RED)
             
@@ -1697,7 +1728,6 @@ class Yunbase():
         self.PrintColor("prediction on test data")
         if self.objective=='regression':
             test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test)))
-            cnt=0
             for idx in range(len(self.trained_models)): 
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
                 try:
@@ -1705,8 +1735,10 @@ class Yunbase():
                 except:#catboost
                     test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
-                test_preds[cnt]=test_pred
-                cnt+=1
+                test_preds[idx]=test_pred
+                if self.use_oof_as_feature and idx%self.num_folds==self.num_folds-1:
+                     self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)
+                    
             if self.save_test_preds:
                 np.save(self.model_save_path+'test_preds.npy',test_preds)
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
@@ -1720,7 +1752,6 @@ class Yunbase():
                 self.cal_final_score(weights)
                 
                 test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test)))
-                cnt=0
                 for idx in range(len(self.trained_models)):
                     test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds))
                     try:
@@ -1728,8 +1759,8 @@ class Yunbase():
                     except:
                         test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                         test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
-                    test_preds[cnt]=test_pred
-                    cnt+=1
+                    test_preds[idx]=test_pred
+                
                 if self.save_test_preds:
                     np.save(self.model_save_path+'test_preds.npy',test_preds)
                 test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
@@ -1738,7 +1769,6 @@ class Yunbase():
             return test_preds
         else:#classification 
             test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
-            cnt=0
             for idx in range(len(self.trained_models)):
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds))
                 try:
@@ -1746,8 +1776,11 @@ class Yunbase():
                 except:
                     test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                     test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
-                test_preds[cnt]=test_pred
-                cnt+=1  
+                test_preds[idx]=test_pred
+                if self.use_oof_as_feature and idx%self.num_folds==self.num_folds-1:
+                    for c in range(self.num_classes):
+                        self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds_class{c}']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)[:,c]
+                        
             if self.save_test_preds:
                 np.save(self.model_save_path+'test_preds.npy',test_preds)
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
