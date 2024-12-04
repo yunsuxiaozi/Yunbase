@@ -1,7 +1,8 @@
+
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/03
+@update_time:2024/12/04
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -17,6 +18,8 @@ from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,G
 from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
 #models(lgb,xgb,cat,ridge,lr,tabnet)
 from sklearn.linear_model import Ridge,LinearRegression,LogisticRegression
+#fit(oof_preds,target)
+from cir_model import CenteredIsotonicRegression
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor,CatBoostClassifier
 from xgboost import XGBRegressor,XGBClassifier
@@ -91,6 +94,8 @@ class Yunbase():
                       use_reduce_memory:bool=False,
                       use_data_augmentation:bool=False,
                       use_oof_as_feature:bool=False,
+                      use_CIR:bool=False,
+                      use_median_as_pred:bool=False,
                       use_scaler:bool=False,
                       AGGREGATIONS:list=['nunique','count','min','max','first',
                                            'last', 'mean','median','sum','std','skew',kurtosis],
@@ -149,6 +154,8 @@ class Yunbase():
                                will undergo PCA transformation followed by inverse transformation.
         use_oof_as_feature    :Train the next model using the oof_preds obtained from the previous 
                                model as features, and the same applies to inference.
+        use_CIR               :use CenteredIsotonicRegression to fit oof_preds and target.
+        use_median_as_pred    :use median.(axis=0)) instead of mean.(axis=0)
         use_scaler            :use robust scaler to deal with outlier.
         cross_cols            :Construct features for adding, subtracting, multiplying, and dividing these columns.
         AGGREGATIONS          :['nunique','count','min','max','first','last',
@@ -253,11 +260,13 @@ class Yunbase():
         self.use_reduce_memory=use_reduce_memory
         self.use_data_augmentation=use_data_augmentation
         self.use_oof_as_feature=use_oof_as_feature
+        self.use_CIR=use_CIR
+        self.use_median_as_pred=use_median_as_pred
         self.use_scaler=use_scaler
 
         attritubes=['save_oof_preds','save_test_preds','exp_mode',
                     'use_reduce_memory','use_data_augmentation','use_scaler',
-                    'use_oof_as_feature'
+                    'use_oof_as_feature','use_CIR','use_median_as_pred'
                    ]
         for attr in attritubes:
             if getattr(self,attr) not in [True,False]:
@@ -272,6 +281,7 @@ class Yunbase():
         #If inference one batch of data at a time requires repeatedly loading the model,
         #it will increase the program's running time.we need to save  in dictionary when load.
         self.trained_models=[]#trained model
+        self.trained_CIR=[]#trained CIR model
         self.trained_le={}
         self.trained_wordvec={}
         self.trained_svd={}
@@ -1117,10 +1127,7 @@ class Yunbase():
                     if self.plot_feature_importance:
                         #can only support GBDT.
                         if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
-                            origin_features=[]
-                            for col in X_train.columns:
-                                origin_features.append(col)
-                                
+                            origin_features=list(X_train.columns)  
                             feature_importance=model.feature_importances_
                             #convert to percentage
                             feature_importance=feature_importance/np.sum(feature_importance)
@@ -1403,11 +1410,19 @@ class Yunbase():
             
             del X_train,y_train,X_valid,y_valid
             gc.collect()
+        y=y.values
         if self.exp_mode:#y and oof need expm1.
-            #log(y+b)
-            metric_score=self.Metric(np.expm1(y.values)-self.exp_mode_b,np.expm1(oof_preds)-self.exp_mode_b )
-        else:
-            metric_score=self.Metric(y.values,oof_preds)
+            y=np.expm1(y)-self.exp_mode_b
+            oof_preds=np.expm1(oof_preds)-self.exp_mode_b
+        if self.use_CIR:
+            print(f"{self.metric} before CIR:{self.Metric(y,oof_preds)}")
+            CIR=CenteredIsotonicRegression().fit(oof_preds,y)
+            oof_preds=CIR.transform(oof_preds)
+            #save CIR models
+            self.pickle_dump(CIR,self.model_save_path+f'CIR_{model_name}_repeat{repeat}_fold{fold}.model')
+            self.trained_CIR.append(copy.deepcopy(CIR))
+        
+        metric_score=self.Metric(y,oof_preds)
         return oof_preds,metric_score
     
     def drop_high_correlation_feats(self,df:pd.DataFrame)->None:
@@ -1463,6 +1478,9 @@ class Yunbase():
         
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
+        #save true label in train data to calculate final score  
+        self.target=y.values
+        
         if self.exp_mode:#use log transform for target_col
             self.exp_mode_b=-y.min()
             y=np.log1p(y+self.exp_mode_b)
@@ -1491,8 +1509,6 @@ class Yunbase():
             group=self.train[self.group_col]
         else:
             group=None
-        #save true label in train data to calculate final score  
-        self.target=y.values
         
         #if you don't use your own models,then use built-in models.
         self.PrintColor("load models")
@@ -1624,9 +1640,26 @@ class Yunbase():
                 else:
                     kf=KFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
             kf_folds=pd.DataFrame({"fold":np.zeros(len(y))})
+            #use groupkfoldshuffle
+            if (self.group_col!=None) and self.objective=='regression':
+                unique_group=sorted(group.unique())
+                random_group=unique_group.copy()
+                np.random.shuffle(random_group)
+                random_map={k:v for k,v in zip(unique_group,random_group)}
+                group=group.apply(lambda x:random_map[x])
+                group=group.sort_values()
+                X=X.loc[list(group.index)]
+                y=y.loc[list(group.index)]
+                del unique_group,random_group,random_map
+                gc.collect()
+                
             for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
                 kf_folds['fold'][valid_index]=fold
-                
+            #sort_index
+            if (self.group_col!=None):
+                X,y=X.sort_index(),y.sort_index()
+                group,kf_folds=group.sort_index(),kf_folds.sort_index()
+            
             #check params and update
             for i in range(len(self.models)):
                 model,model_name=self.models[i]
@@ -1652,7 +1685,7 @@ class Yunbase():
 
                 metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
                 self.PrintColor(f"{metric}------------------------------>{metric_score}",color = Fore.RED)
-            
+
                 if self.save_oof_preds:#if oof_preds is needed
                     np.save(self.model_save_path+f"{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}.npy",oof_preds)
 
@@ -1666,10 +1699,7 @@ class Yunbase():
                     oof_preds+=weights[i+repeat*self.num_folds]*oof_pred
                 oof_preds=oof_preds/len(self.models)
                 metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
-                if self.exp_mode:
-                    print(f"final_repeat{repeat}_{metric}:{self.Metric( np.expm1( self.target)-self.exp_mode_b,np.expm1( oof_preds)-self.exp_mode_b )}")
-                else:
-                    print(f"final_repeat{repeat}_{metric}:{self.Metric(self.target,oof_preds)}")
+                print(f"final_repeat{repeat}_{metric}:{self.Metric(self.target,oof_preds)}")
 
     def predict_batch(self,model,test_X):
         test_preds=np.zeros((len(test_X)))
@@ -1735,18 +1765,24 @@ class Yunbase():
                 except:#catboost
                     test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
+                if self.use_CIR:
+                    test_pred=self.trained_CIR[idx//self.num_folds].transform(test_pred)
                 test_preds[idx]=test_pred
                 if self.use_oof_as_feature and idx%self.num_folds==self.num_folds-1:
-                     self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)
+                    self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)
                     
             if self.save_test_preds:
                 np.save(self.model_save_path+'test_preds.npy',test_preds)
-            test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
+            if self.use_median_as_pred:
+                test_preds=np.median(test_preds,axis=0)
+            else:
+                test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             
             #use pseudo label
             if self.use_pseudo_label:
                 self.test[self.target_col]=test_preds
                 self.trained_models=[]
+                self.trained_CIR=[]
                 self.fit(self.train_path_or_file,self.weight_col,self.category_cols)
                 #calculate oof score if save_oof_preds
                 self.cal_final_score(weights)
@@ -1763,7 +1799,10 @@ class Yunbase():
                 
                 if self.save_test_preds:
                     np.save(self.model_save_path+'test_preds.npy',test_preds)
-                test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
+                if self.use_median_as_pred:
+                    test_preds=np.median(test_preds,axis=0)
+                else:
+                    test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
             if self.exp_mode:
                 test_preds=np.expm1(test_preds)-self.exp_mode_b       
             return test_preds

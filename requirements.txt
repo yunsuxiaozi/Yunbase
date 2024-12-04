@@ -18,3 +18,4 @@ emoji
 pytorch_tabnet
 matplotlib
 seaborn
+cir-model
