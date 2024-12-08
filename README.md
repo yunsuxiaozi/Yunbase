@@ -74,6 +74,9 @@ yunbase=Yunbase(  num_folds:int=5,
                   exp_mode:bool=False,
                   use_reduce_memory:bool=False,
                   use_data_augmentation:bool=False,
+                  use_oof_as_feature:bool=False,
+                  use_CIR:bool=False,
+                  use_median_as_pred:bool=False,
                   use_scaler:bool=False,
                   AGGREGATIONS:list=['nunique','count','min','max','first',
                                      'last','mean','median','sum','std','skew',kurtosis],
@@ -84,7 +87,13 @@ yunbase=Yunbase(  num_folds:int=5,
 
 - n_repeats:<b>int</b>,Replace different seeds for multiple kfold cross validation.
 
-- models:<b>list of models</b>.Built in 3 GBDTs as baseline, you can also use custom models,such as models=[(LGBMRegressor(**lgb_params),'lgb')].
+- models:<b>list of models</b>.Built in 3 GBDTs as baseline, you can also use custom models,such as 
+  
+  ```python
+  models=[(LGBMRegressor(**lgb_params),'lgb')]
+  ```
+  
+  
   
 - FE:<b>function</b>.In addition to the built-in feature engineer, you can also customize feature engineer.For example:
 
@@ -177,6 +186,12 @@ yunbase=Yunbase(  num_folds:int=5,
 
 - use_data_augmentation:<b>bool</b>.if use data augmentation,During cross validation, the training data will undergo PCA transformation followed by inverse transformation.
 
+- use_oof_as_feature:<b>bool</b>.For training data, use the oof_preds of the previous model as the feature, and for testing data, use the predicted results of the previous model as the feature for next model.
+
+- use_CIR:<b>bool</b>. use CenteredIsotonicRegression to fit(oof_preds,target) in the final.
+
+- use_median_as_pred:<b>bool</b>.The general model ensemble uses the mean as the prediction result, and this parameter uses median as the prediction result, which sometimes achieves better results, but only slightly.
+
 - use_scaler:<b>bool</b>.use robust scaler to deal with outlier.
 
 6.yunbase training
@@ -251,7 +266,7 @@ yunbase.model_save_path=your_model_save_path
 yunbase.train,yunbase.test
 ```
 
-##### <a href="https://www.kaggle.com/code/yunsuxiaozi/yunbase">Here</a> is a static version that can be used to play Kaggle competition.You can refer to this <a href="https://www.kaggle.com/code/yunsuxiaozi/pss4e12-yunbase-benchmark">notebook</a> to learn usage of Yunbase. 
+##### <a href="https://www.kaggle.com/code/yunsuxiaozi/yunbase">Here</a> is a static version that can be used to play Kaggle competition.You can refer to this <a href="https://www.kaggle.com/code/yunsuxiaozi/brist1d-top5-solution">notebook</a> to learn usage of Yunbase. 
 
 ## TimeSeries Purged CV
 
@@ -295,4 +310,10 @@ Waiting for updates.
 
 Kaggle:https://www.kaggle.com/yunsuxiaozi
 
- update time:2024/12/01(baseline.py and README may not synchronize updates)
+<img src="star-history-2024128.png" alt="yunbase title image" style="zoom:100%;" />
+
+
+
+
+
+ update time:2024/12/08(baseline.py and README may not synchronize updates)
