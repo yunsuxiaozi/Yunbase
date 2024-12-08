@@ -1,8 +1,7 @@
-
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/04
+@update_time:2024/12/08
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -428,7 +427,29 @@ class Yunbase():
         S=100*sentence/words
         clri_score=0.0588*L-0.296*S-15.8
         return clri_score
-         
+
+    #https://www.kaggle.com/competitions/home-credit-credit-risk-model-stability/discussion/501577
+    def lgb_eval_metric(self,y_true,y_pred):
+        if self.exp_mode:
+            y_true,y_pred=np.expm1(y_true)-self.exp_mode_b,np.expm1(y_pred)-self.exp_mode_b
+        score=self.Metric(y_true,y_pred)
+        if self.custom_metric!=None:
+            return self.custom_metric.__name__,score, bool(self.optuna_direction=='maximize')
+        else:
+            direction='minimize'
+            if self.metric in self.direction2metric['maximize']:
+                direction='maximize'
+            return self.metric,score, bool(direction=='maximize')
+    def xgb_eval_metric(self,y_true,y_pred):
+        y_pred=y_pred.get_label()
+        if self.exp_mode:
+            y_true,y_pred=np.expm1(y_true)-self.exp_mode_b,np.expm1(y_pred)-self.exp_mode_b
+        score=self.Metric(y_true,y_pred)
+        if self.custom_metric!=None:
+            return self.custom_metric.__name__,score
+        else:
+            return self.metric,score
+        
     #basic Feature Engineer,mode='train' or 'test' ,drop_cols is other cols you want to delete.
     def base_FE(self,df:pd.DataFrame,mode:str='train',drop_cols:list[str]=[])->pd.DataFrame:
         if self.FE!=None:
@@ -810,7 +831,11 @@ class Yunbase():
             if len(weight)!=0:
                 return self.custom_metric(y_true,y_pred,weight)
             else:
-                return self.custom_metric(y_true,y_pred)
+                try:
+                    return self.custom_metric(y_true,y_pred)
+                except:
+                    weight=np.ones(len(y_true))
+                    return self.custom_metric(y_true,y_pred,weight)
         if self.objective=='regression':
             if self.metric=='medae':
                 return np.median(np.abs(y_true-y_pred))
@@ -1046,13 +1071,17 @@ class Yunbase():
                 test_date_max=test_date_min+test_date_range
                 print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
                 print(f"test_date_min:{test_date_min},test_date_max:{test_date_max}")
+                
                 train_fold=self.train.copy()[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
                 valid_fold=self.train.copy()[(self.train[self.date_col]>=test_date_min)&(self.train[self.date_col]<=test_date_max)]
+                
                 X_train=train_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
-                train_weight,valid_weight=train_fold[self.weight_col],valid_fold[self.weight_col]
                 y_train=train_fold[self.target_col]
                 X_valid=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
                 y_valid=valid_fold[self.target_col]
+                train_weight,valid_weight=train_fold[self.weight_col],valid_fold[self.weight_col]
+                del train_fold,valid_fold
+                gc.collect()
 
                 X_train=self.CV_FE(X_train,mode='train',fold=fold)
                 X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
@@ -1074,6 +1103,7 @@ class Yunbase():
                                  raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
                         model.fit(X_train, y_train,eval_set=[(X_valid, y_valid)],
                                   sample_weight=train_weight,
+                                  eval_metric=self.lgb_eval_metric,
                                   callbacks=[log_evaluation(self.log)])
                     elif 'xgb' in model_name:
                         #gpu params isn't set
@@ -1083,6 +1113,7 @@ class Yunbase():
                                  raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
                         model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                                   sample_weight=train_weight,
+                                  eval_metric=self.xgb_eval_metric,
                                   verbose=self.log)
                     elif 'cat' in model_name:
                         #gpu params isn't set
@@ -1161,14 +1192,14 @@ class Yunbase():
                     else:
                         CV_score.append(self.Metric(y_valid,valid_pred)) 
                     
-                    del X_train,y_train,X_valid,y_valid,valid_pred
-                    gc.collect()
                     if 'tabnet' not in model_name:
                         self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}.model')
                     metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
                     print(f"{metric}:{CV_score[-1]}")
                 self.PrintColor(f"mean_{metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
-            
+                del X_train,y_train,X_valid,y_valid,valid_pred,train_weight,valid_weight
+                gc.collect()
+                
         self.PrintColor("prediction on test data")
         train_date_min=self.train[self.date_col].max()-train_test_gap-train_date_range
         train_date_max=self.train[self.date_col].max()-train_test_gap
@@ -1177,6 +1208,8 @@ class Yunbase():
         train_weight=train[self.weight_col]
         X_train=train.drop([self.target_col,self.date_col,self.weight_col],axis=1)
         y_train=train[self.target_col]
+        del train
+        gc.collect()
         
         test_X=self.test.drop([self.date_col],axis=1)
 
@@ -1275,19 +1308,20 @@ class Yunbase():
             X_valid=self.CV_FE(X_valid,mode='test',fold=fold,repeat=repeat)
             sample_weight_train=sample_weight.iloc[train_index].reset_index(drop=True)
 
-            if self.CV_sample!=None:
-                X_train,y_train,sample_weight_train=self.CV_sample(X_train,y_train,sample_weight_train)
-            
             if (self.use_pseudo_label) and (type(self.test)==pd.DataFrame):
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold,repeat=repeat)
                 test_X=test_copy.drop([self.group_col,self.target_col],axis=1,errors='ignore')
                 test_y=test_copy[self.target_col]
+                
                 #concat will transform 'category' to 'object'
                 X_train=pd.concat((X_train,test_X),axis=0)
                 X_train[self.category_cols]=X_train[self.category_cols].astype('category')
                 y_train=pd.concat((y_train,test_y),axis=0)
-                sample_weight_train=np.ones(len(X_train))
-
+                sample_weight_train=pd.concat((sample_weight_train,pd.DataFrame({'weight':np.ones(len(test_X))*0.5})['weight']))
+                
+                del test_X,test_copy
+                gc.collect()
+                
             if self.use_data_augmentation:#X_train,y_train,sample_weight_train
                 origin_data=pd.concat((X_train,y_train),axis=1)
                 n_components=np.clip( int(origin_data.shape[1]*0.8),1,X_train.shape[1])
@@ -1296,12 +1330,19 @@ class Yunbase():
                 aug_data=pca.inverse_transform(pca_data)
                 aug_data=pd.DataFrame(aug_data)
                 aug_data.columns=list(X_train.columns)+[self.target_col]
+                
                 #concat origin_data aug_data
                 X_train=pd.concat((X_train,aug_data[X_train.columns]),axis=0)
                 X_train[self.category_cols]=X_train[self.category_cols].astype('category')
                 y_train=pd.concat((y_train,y_train),axis=0)
-                sample_weight_train=np.concatenate((sample_weight_train,sample_weight_train),axis=0)
-    
+                sample_weight_train=pd.concat((sample_weight_train,sample_weight_train),axis=0)
+
+                del origin_data,pca,pca_data,aug_data
+                gc.collect()
+
+            if self.CV_sample!=None:
+                X_train,y_train,sample_weight_train=self.CV_sample(X_train,y_train,sample_weight_train)
+                
             if 'lgb' in model_name:
                 #gpu params isn't set
                 if self.device in ['cuda','gpu']:#gpu mode when training
@@ -1310,6 +1351,7 @@ class Yunbase():
                          raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                          sample_weight=sample_weight_train,
+                         eval_metric=self.lgb_eval_metric,
                          categorical_feature=self.category_cols,
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
                     )
@@ -1326,15 +1368,16 @@ class Yunbase():
                       cat_features=self.category_cols,
                       sample_weight=sample_weight_train,
                       early_stopping_rounds=self.early_stop, verbose=log)
-            elif 'xgb' in model_name:
-                
+            elif 'xgb' in model_name: 
                 #gpu params isn't set
                 if self.device in ['cuda','gpu']:#gpu mode when training
                     params=model.get_params()
                     if (params.get('tree_method',-1)!='gpu_hist'):
                          raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
-                          sample_weight=sample_weight_train,verbose=log)
+                          sample_weight=sample_weight_train,
+                          eval_metric=self.xgb_eval_metric,
+                          verbose=log)
             elif 'tabnet' in model_name:
                  cat_idxs,cat_dims=[],[]
                  X_train_columns=list(X_train.columns)
@@ -1370,9 +1413,7 @@ class Yunbase():
             if (use_optuna==False) and (self.plot_feature_importance):
                 #can only support GBDT.
                 if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
-                    origin_features=[]
-                    for col in X_train.columns:
-                        origin_features.append(col)
+                    origin_features=list(X_train.columns)
                             
                     feature_importance=model.feature_importances_
                     #convert to percentage
@@ -1421,6 +1462,8 @@ class Yunbase():
             #save CIR models
             self.pickle_dump(CIR,self.model_save_path+f'CIR_{model_name}_repeat{repeat}_fold{fold}.model')
             self.trained_CIR.append(copy.deepcopy(CIR))
+            del CIR
+            gc.collect()
         
         metric_score=self.Metric(y,oof_preds)
         return oof_preds,metric_score
@@ -1445,6 +1488,8 @@ class Yunbase():
                             drop_cols.append(numerical_cols[j])
         #add drop_cols to self.drop_cols,they will be dropped in the final part of the function base_FE.
         print(f"drop_cols={drop_cols}")
+        del numerical_cols
+        gc.collect()
         return drop_cols
     
     def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
@@ -1478,12 +1523,6 @@ class Yunbase():
         
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
         y=self.train[self.target_col]
-        #save true label in train data to calculate final score  
-        self.target=y.values
-        
-        if self.exp_mode:#use log transform for target_col
-            self.exp_mode_b=-y.min()
-            y=np.log1p(y+self.exp_mode_b)
         
         #special characters in columns'name will lead to errors when GBDT model training.
         X_columns=list(X.columns)
@@ -1504,6 +1543,13 @@ class Yunbase():
                     self.target2idx[y_unique[idx]]=idx
                     self.idx2target[idx]=y_unique[idx]
             y=y.apply(lambda k:self.target2idx[k])
+
+        #save true label in train data to calculate final score  
+        self.target=y.values
+        
+        if self.exp_mode:#use log transform for target_col
+            self.exp_mode_b=-y.min()
+            y=np.log1p(y+self.exp_mode_b)
         
         if self.group_col!=None:
             group=self.train[self.group_col]
@@ -1533,7 +1579,7 @@ class Yunbase():
                     metric='multi_logloss'
             if metric=='accuracy':
                 metric='auc'
-            lgb_params={"boosting_type": "gbdt","metric": metric,
+            lgb_params={"boosting_type": "gbdt","metric": 'None',
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.1,
                         "n_estimators": 20000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
                         "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
@@ -1615,6 +1661,9 @@ class Yunbase():
                 lgb_params['gpu_use_dp']=True
                 cat_params['task_type']="GPU"
                 xgb_params['tree_method']='gpu_hist'
+            else:#self.device=='cpu'
+                lgb_params['n_jobs']=-1
+                xgb_params['n_jobs']=-1
                 
             if self.objective=='regression':
                 self.models=[(LGBMRegressor(**lgb_params),'lgb'),
