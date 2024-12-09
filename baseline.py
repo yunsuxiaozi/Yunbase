@@ -1,11 +1,12 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/08
+@update_time:2024/12/09
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
 import numpy as np#for scientific computation of matrices
+from tqdm import tqdm#progress bar
 from scipy.stats import kurtosis#calculate kurt
 #powerful plot libraries
 import matplotlib.pyplot as plt
@@ -96,6 +97,8 @@ class Yunbase():
                       use_CIR:bool=False,
                       use_median_as_pred:bool=False,
                       use_scaler:bool=False,
+                      use_eval_metric:bool=True,
+                      feats_stat:list[tuple]=[],
                       AGGREGATIONS:list=['nunique','count','min','max','first',
                                            'last', 'mean','median','sum','std','skew',kurtosis],
                 )->None:
@@ -112,14 +115,14 @@ class Yunbase():
                                You can perform downsampling, upsampling, taking the first 10000 data 
                                points, and other operations you want here, and 
                                ultimately return any X_train or y_train,sample_weight.
+        group_col             :if you want to use groupkfold,then define this group_col.
+        target_col            :the column that you want to predict.
         drop_cols             :The column to be deleted after all feature engineering is completed.
         seed                  :random seed.
         objective             :what task do you want to do?regression,binary or multi_class?
         metric                :metric to evaluate your model.
         nan_margin            :when the proportion of missing values in a column is greater than, we delete this column.
-        group_col             :if you want to use groupkfold,then define this group_col.
         num_classes           :if objectibe is multi_class,you should define this class.
-        target_col            :the column that you want to predict.
         infer_size            :the test data might be large,we can predict in batches.
         save_oof_preds        :you can save OOF for offline study.
         save_test_preds       :you can save test_preds.For multi classification tasks, 
@@ -137,6 +140,7 @@ class Yunbase():
                                to the training data and training again after obtaining the predicted 
                                results of the test data.
         use_high_corr_feat    :whether to use high correlation features or not. 
+        cross_cols            :Construct features for adding, subtracting, multiplying, and dividing these columns.
         labelencoder_cols     :Convert categorical string variables into [1,2,……,n].
         list_cols             :If the data in a column is a list or str(list), this can be used to extract features.
         list_gaps             :extract features for list_cols.example=[1,2,4]
@@ -156,7 +160,9 @@ class Yunbase():
         use_CIR               :use CenteredIsotonicRegression to fit oof_preds and target.
         use_median_as_pred    :use median.(axis=0)) instead of mean.(axis=0)
         use_scaler            :use robust scaler to deal with outlier.
-        cross_cols            :Construct features for adding, subtracting, multiplying, and dividing these columns.
+        use_eval_metric       : use 'eval_metric' when training lightgbm or xgboost.
+        feats_stat            : (group_col,feature_col,aggregation_list)
+                               example:feats_stat = [ ('id','up_time', ['min', 'max'])   ]
         AGGREGATIONS          :['nunique','count','min','max','first','last',
                                'mean','median','sum','std','skew',kurtosis,q1,q3],
         """
@@ -196,7 +202,7 @@ class Yunbase():
         
         self.custom_metric=custom_metric#function
         if self.custom_metric!=None:
-            self.metric='custom_metric'
+            self.metric=self.custom_metric.__name__
         else:
             self.metric=metric.lower()
         if self.metric not in self.supported_metrics and self.custom_metric==None:
@@ -262,10 +268,11 @@ class Yunbase():
         self.use_CIR=use_CIR
         self.use_median_as_pred=use_median_as_pred
         self.use_scaler=use_scaler
+        self.use_eval_metric=use_eval_metric
 
         attritubes=['save_oof_preds','save_test_preds','exp_mode',
                     'use_reduce_memory','use_data_augmentation','use_scaler',
-                    'use_oof_as_feature','use_CIR','use_median_as_pred'
+                    'use_oof_as_feature','use_CIR','use_median_as_pred','use_eval_metric'
                    ]
         for attr in attritubes:
             if getattr(self,attr) not in [True,False]:
@@ -274,6 +281,7 @@ class Yunbase():
         if self.use_oof_as_feature and self.use_pseudo_label:
             raise ValueError(f"use_oof_as_feature and use_pseudo_label cannot be both True at the same time.")
         
+        self.feats_stat=feats_stat
         #common AGGREGATIONS
         self.AGGREGATIONS = AGGREGATIONS
         
@@ -661,6 +669,14 @@ class Yunbase():
                 
                 #drop index after using.
                 df.drop(['index'],axis=1,inplace=True)
+
+        if len(self.feats_stat):
+            print("< groupby feature >")
+            for items in self.feats_stat:
+                group_col,feature_col,AGGREGATIONS=items
+                agg_df = df[[group_col,feature_col]].groupby(group_col).agg(AGGREGATIONS)
+                agg_df.columns = ['_'.join(x) for x in agg_df.columns]
+                df=df.merge(agg_df,on=group_col,how='left')
         
         if len(self.word2vec_models):#word2vec transform
             self.word2vec_cols=[]
@@ -1103,7 +1119,7 @@ class Yunbase():
                                  raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
                         model.fit(X_train, y_train,eval_set=[(X_valid, y_valid)],
                                   sample_weight=train_weight,
-                                  eval_metric=self.lgb_eval_metric,
+                                  eval_metric=self.lgb_eval_metric if self.use_eval_metric else None,
                                   callbacks=[log_evaluation(self.log)])
                     elif 'xgb' in model_name:
                         #gpu params isn't set
@@ -1113,7 +1129,7 @@ class Yunbase():
                                  raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
                         model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                                   sample_weight=train_weight,
-                                  eval_metric=self.xgb_eval_metric,
+                                  eval_metric=self.xgb_eval_metric if self.use_eval_metric else None,
                                   verbose=self.log)
                     elif 'cat' in model_name:
                         #gpu params isn't set
@@ -1296,7 +1312,7 @@ class Yunbase():
             oof_preds=np.zeros(len(y))
         else:
             oof_preds=np.zeros((len(y),self.num_classes))
-        for fold in range(self.num_folds):
+        for fold in tqdm(range(self.num_folds)):
             train_index=kf_folds[kf_folds['fold']!=fold].index
             valid_index=kf_folds[kf_folds['fold']==fold].index
             print(f"name:{model_name},fold:{fold}")
@@ -1351,7 +1367,7 @@ class Yunbase():
                          raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                          sample_weight=sample_weight_train,
-                         eval_metric=self.lgb_eval_metric,
+                         eval_metric=self.lgb_eval_metric if self.use_eval_metric else None,
                          categorical_feature=self.category_cols,
                          callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
                     )
@@ -1376,7 +1392,7 @@ class Yunbase():
                          raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                           sample_weight=sample_weight_train,
-                          eval_metric=self.xgb_eval_metric,
+                          eval_metric=self.xgb_eval_metric if self.use_eval_metric else None,
                           verbose=log)
             elif 'tabnet' in model_name:
                  cat_idxs,cat_dims=[],[]
@@ -1967,7 +1983,14 @@ class Yunbase():
             return final_solutions
 
     #save test_preds to submission.csv
-    def submit(self,submission_path_or_file:str|pd.DataFrame='submission.csv',test_preds:np.array=np.ones(3),save_name:str='yunbase'):
+    def submit(self,submission_path_or_file:str|pd.DataFrame='submission.csv',
+               test_preds:np.array=np.ones(3),save_name:str='yunbase'):
+        """
+        submission_path_or_file  :Usually it is a submittion.csv file.
+        test_preds               :The prediction results of the model on the test data.
+        save_name                :A string,if save_name='subsmission',then you will
+                                  get a submittion.csv file.
+        """
         self.PrintColor('submission......',color = Fore.GREEN)
         submission=self.load_data(submission_path_or_file,mode='submission')
         submission[self.target_col]=test_preds

@@ -2,6 +2,7 @@
 polars
 pandas
 numpy
+tqdm
 scikit-learn
 lightgbm
 catboost
