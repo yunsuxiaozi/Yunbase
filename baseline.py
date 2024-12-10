@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/09
+@update_time:2024/12/10
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -64,6 +64,7 @@ class Yunbase():
                       CV_sample=None,
                       group_col=None,
                       target_col:str='target',
+                      weight_col:str='weight',
                       drop_cols:list[str]=[],
                       seed:int=2024,
                       objective:str='regression',
@@ -117,6 +118,7 @@ class Yunbase():
                                ultimately return any X_train or y_train,sample_weight.
         group_col             :if you want to use groupkfold,then define this group_col.
         target_col            :the column that you want to predict.
+        weight_col            :
         drop_cols             :The column to be deleted after all feature engineering is completed.
         seed                  :random seed.
         objective             :what task do you want to do?regression,binary or multi_class?
@@ -302,7 +304,7 @@ class Yunbase():
         self.eps=1e-15#clip (eps,1-eps) | divide by zero.
         self.category_cols=[]
         self.high_corr_cols=[]
-        self.weight_col='weight'#weight_col purged_CV
+        self.weight_col=weight_col
 
     def get_params(self,):        
         params_dict={'num_folds':self.num_folds,'seed':self.seed,'nan_margin':self.nan_margin,
@@ -912,7 +914,20 @@ class Yunbase():
                 model=LGBMClassifier(**params)   
             oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,kf_folds=kf_folds,
                                                          model=model,model_name=model_name,
-                                                         sample_weight=self.sample_weight,use_optuna=True)
+                                                         sample_weight=self.sample_weight,use_optuna=True,                       
+                                                         repeat=0,num_folds=self.num_folds,CV_FE=self.CV_FE,
+                                                         num_classes=self.num_classes,objective=self.objective,
+                                                         log=self.log,use_pseudo_label=self.use_pseudo_label,
+                                                         test=self.test,group_col=self.group_col,target_col=self.target_col,
+                                                         category_cols=self.category_cols,
+                                                         use_data_augmentation=self.use_data_augmentation,
+                                                         CV_sample=self.CV_sample,device=self.device,
+                                                         early_stop=self.early_stop,use_eval_metric=self.use_eval_metric,
+                                                         lgb_eval_metric=self.lgb_eval_metric,xgb_eval_metric=self.xgb_eval_metric,
+                                                         plot_feature_importance=self.plot_feature_importance,
+                                                         exp_mode=self.exp_mode,exp_mode_b=self.exp_mode_b,
+                                                         use_CIR=self.use_CIR,metric=self.metric,Metric=self.Metric
+                                                        )
             return metric_score
         
         #direction is 'minimize' or 'maximize'
@@ -968,6 +983,8 @@ class Yunbase():
             self.train=file.copy()
             #if target_col is nan,then drop these data.
             self.train=self.train[~self.train[self.target_col].isna()]
+            if self.weight_col not in list(self.train.columns):
+               self.train[self.weight_col]=1
             if len(self.train)<=self.one_hot_max:
                 raise ValueError(f"one_hot_max must less than {len(self.train)}")
         elif mode=='test':
@@ -996,7 +1013,6 @@ class Yunbase():
                                 train_date_range:int=0,test_date_range:int=0,
                                 category_cols:list[str]=[],
                                 use_seasonal_features:bool=True,
-                                weight_col:str='weight',
                                 use_weighted_metric:bool=False,
                                 only_inference:bool=False,
                                ):
@@ -1027,9 +1043,6 @@ class Yunbase():
         if len(self.test.dropna())==0:
             raise ValueError("At least one row of test data must have no missing values.")
         self.date_col=date_col
-        self.weight_col=weight_col
-        if self.weight_col not in list(self.train.columns):
-            self.train[self.weight_col]=1
         
         self.category_cols=self.colname_clean(category_cols)
         self.target_dtype=self.train[self.target_col].dtype
@@ -1304,15 +1317,27 @@ class Yunbase():
     # return oof_preds and metric_score
     # can use optuna to find params.If use optuna,then not save models.
     def cross_validation(self,X:pd.DataFrame,y:pd.DataFrame,group,kf_folds:pd.DataFrame,
-                         model,model_name,sample_weight,use_optuna,repeat:int=0,):
-        log=self.log
+                         model,model_name,sample_weight,use_optuna,repeat:int=0,
+                         num_folds=5,CV_FE=None,
+                         num_classes=None,objective='regression',
+                         log=100,use_pseudo_label:bool=False,
+                         test=None,group_col=None,target_col:str='target',
+                         category_cols=[],
+                         use_data_augmentation:bool=False,
+                         CV_sample=None,device:str='cpu',
+                         early_stop:int=100,use_eval_metric:bool=False,
+                         lgb_eval_metric=None,xgb_eval_metric=None,
+                         plot_feature_importance:bool=False,
+                         exp_mode:bool=False,exp_mode_b:int=0,
+                         use_CIR:bool=False,metric=None,Metric=None,
+                        ):
         if use_optuna:
             log=10000
-        if self.objective=='regression':
+        if objective=='regression':
             oof_preds=np.zeros(len(y))
         else:
-            oof_preds=np.zeros((len(y),self.num_classes))
-        for fold in tqdm(range(self.num_folds)):
+            oof_preds=np.zeros((len(y),num_classes))
+        for fold in tqdm(range(num_folds)):
             train_index=kf_folds[kf_folds['fold']!=fold].index
             valid_index=kf_folds[kf_folds['fold']==fold].index
             print(f"name:{model_name},fold:{fold}")
@@ -1320,79 +1345,81 @@ class Yunbase():
             X_train, X_valid = X.iloc[train_index].reset_index(drop=True), X.iloc[valid_index].reset_index(drop=True)
             y_train, y_valid = y.iloc[train_index].reset_index(drop=True), y.iloc[valid_index].reset_index(drop=True)
 
-            X_train=self.CV_FE(X_train,mode='train',fold=fold,repeat=repeat)
-            X_valid=self.CV_FE(X_valid,mode='test',fold=fold,repeat=repeat)
+            if CV_FE!=None:
+                X_train=CV_FE(X_train,mode='train',fold=fold,repeat=repeat)
+                X_valid=CV_FE(X_valid,mode='test',fold=fold,repeat=repeat)
             sample_weight_train=sample_weight.iloc[train_index].reset_index(drop=True)
 
-            if (self.use_pseudo_label) and (type(self.test)==pd.DataFrame):
-                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=fold,repeat=repeat)
-                test_X=test_copy.drop([self.group_col,self.target_col],axis=1,errors='ignore')
-                test_y=test_copy[self.target_col]
+            if (use_pseudo_label) and (type(test)==pd.DataFrame):
+                if CV_FE!=None:
+                    test_copy=CV_FE(test.copy(),mode='test',fold=fold,repeat=repeat)
+                test_X=test_copy.drop([group_col,target_col],axis=1,errors='ignore')
+                test_y=test_copy[target_col]
                 
                 #concat will transform 'category' to 'object'
                 X_train=pd.concat((X_train,test_X),axis=0)
-                X_train[self.category_cols]=X_train[self.category_cols].astype('category')
+                X_train[category_cols]=X_train[category_cols].astype('category')
                 y_train=pd.concat((y_train,test_y),axis=0)
                 sample_weight_train=pd.concat((sample_weight_train,pd.DataFrame({'weight':np.ones(len(test_X))*0.5})['weight']))
                 
                 del test_X,test_copy
                 gc.collect()
                 
-            if self.use_data_augmentation:#X_train,y_train,sample_weight_train
+            if use_data_augmentation:#X_train,y_train,sample_weight_train
                 origin_data=pd.concat((X_train,y_train),axis=1)
                 n_components=np.clip( int(origin_data.shape[1]*0.8),1,X_train.shape[1])
                 pca=PCA(n_components=n_components)
                 pca_data=pca.fit_transform(origin_data)
                 aug_data=pca.inverse_transform(pca_data)
                 aug_data=pd.DataFrame(aug_data)
-                aug_data.columns=list(X_train.columns)+[self.target_col]
+                aug_data.columns=list(X_train.columns)+[target_col]
                 
                 #concat origin_data aug_data
                 X_train=pd.concat((X_train,aug_data[X_train.columns]),axis=0)
-                X_train[self.category_cols]=X_train[self.category_cols].astype('category')
+                X_train[category_cols]=X_train[category_cols].astype('category')
                 y_train=pd.concat((y_train,y_train),axis=0)
                 sample_weight_train=pd.concat((sample_weight_train,sample_weight_train),axis=0)
 
                 del origin_data,pca,pca_data,aug_data
                 gc.collect()
 
-            if self.CV_sample!=None:
-                X_train,y_train,sample_weight_train=self.CV_sample(X_train,y_train,sample_weight_train)
+            if CV_sample!=None:
+                X_train,y_train,sample_weight_train=CV_sample(X_train,y_train,sample_weight_train)
                 
             if 'lgb' in model_name:
                 #gpu params isn't set
-                if self.device in ['cuda','gpu']:#gpu mode when training
+                if device in ['cuda','gpu']:#gpu mode when training
                     params=model.get_params()
                     if (params.get('device',-1)==-1) or (params.get('gpu_use_dp',-1)==-1):
                          raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                          sample_weight=sample_weight_train,
-                         eval_metric=self.lgb_eval_metric if self.use_eval_metric else None,
-                         categorical_feature=self.category_cols,
-                         callbacks=[log_evaluation(log),early_stopping(self.early_stop)]
+                         eval_metric=lgb_eval_metric if use_eval_metric else None,
+                         categorical_feature=category_cols,
+                         callbacks=[log_evaluation(log),early_stopping(early_stop)]
                     )
             elif 'cat' in model_name:
                 #gpu params isn't set
-                if self.device in ['cuda','gpu']:#gpu mode when training
+                if device in ['cuda','gpu']:#gpu mode when training
                     params=model.get_params()
                     if (params.get('task_type',-1)==-1):
                          raise ValueError("The 'task_type' of catboost must be 'GPU'.")
-                X_train[self.category_cols]=X_train[self.category_cols].astype('string')
-                X_valid[self.category_cols]=X_valid[self.category_cols].astype('string')
+                X_train[category_cols]=X_train[category_cols].astype('string')
+                X_valid[category_cols]=X_valid[category_cols].astype('string')
                 model.fit(X_train, y_train,
                       eval_set=(X_valid, y_valid),
-                      cat_features=self.category_cols,
+                      cat_features=category_cols,
                       sample_weight=sample_weight_train,
-                      early_stopping_rounds=self.early_stop, verbose=log)
+                      early_stopping_rounds=early_stop, verbose=log)
             elif 'xgb' in model_name: 
                 #gpu params isn't set
-                if self.device in ['cuda','gpu']:#gpu mode when training
+                if device in ['cuda','gpu']:#gpu mode when training
                     params=model.get_params()
                     if (params.get('tree_method',-1)!='gpu_hist'):
                          raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
                 model.fit(X_train,y_train,eval_set=[(X_valid, y_valid)],
                           sample_weight=sample_weight_train,
-                          eval_metric=self.xgb_eval_metric if self.use_eval_metric else None,
+                          eval_metric=xgb_eval_metric if use_eval_metric else None,
                           verbose=log)
             elif 'tabnet' in model_name:
                  cat_idxs,cat_dims=[],[]
@@ -1407,7 +1434,7 @@ class Yunbase():
                  params['cat_idxs']=cat_idxs
                  params['cat_dims']=cat_dims
                  params['cat_emb_dim']=[5]*len(cat_idxs)
-                 if self.objective=='regression':
+                 if objective=='regression':
                      model=TabNetRegressor(**params)
                      model.fit(
                         X_train.to_numpy(), y_train.to_numpy().reshape(-1,1),
@@ -1426,7 +1453,7 @@ class Yunbase():
                 model.fit(X_train,y_train) 
 
             #print feature importance when not use optuna to find params.
-            if (use_optuna==False) and (self.plot_feature_importance):
+            if (use_optuna==False) and (plot_feature_importance):
                 #can only support GBDT.
                 if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
                     origin_features=list(X_train.columns)
@@ -1450,7 +1477,7 @@ class Yunbase():
                     plt.title(f"{model_name} fold {fold} top{bestk} best Feature Importance")
                     plt.show()
             
-            if self.objective=='regression':
+            if objective=='regression':
                 if 'tabnet' not in model_name:
                     oof_preds[valid_index]=model.predict(X_valid)
                 else:#tabnet
@@ -1468,11 +1495,11 @@ class Yunbase():
             del X_train,y_train,X_valid,y_valid
             gc.collect()
         y=y.values
-        if self.exp_mode:#y and oof need expm1.
-            y=np.expm1(y)-self.exp_mode_b
-            oof_preds=np.expm1(oof_preds)-self.exp_mode_b
-        if self.use_CIR:
-            print(f"{self.metric} before CIR:{self.Metric(y,oof_preds)}")
+        if exp_mode:#y and oof need expm1.
+            y=np.expm1(y)-exp_mode_b
+            oof_preds=np.expm1(oof_preds)-exp_mode_b
+        if use_CIR:
+            print(f"{metric} before CIR:{Metric(y,oof_preds)}")
             CIR=CenteredIsotonicRegression().fit(oof_preds,y)
             oof_preds=CIR.transform(oof_preds)
             #save CIR models
@@ -1481,7 +1508,7 @@ class Yunbase():
             del CIR
             gc.collect()
         
-        metric_score=self.Metric(y,oof_preds)
+        metric_score=Metric(y,oof_preds)
         return oof_preds,metric_score
     
     def drop_high_correlation_feats(self,df:pd.DataFrame)->None:
@@ -1509,7 +1536,7 @@ class Yunbase():
         return drop_cols
     
     def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
-            weight_col='weight',category_cols:list[str]=[],
+            category_cols:list[str]=[],
             target2idx:dict|None=None,
            ):
         if self.num_folds<2:#kfold must greater than 1
@@ -1523,9 +1550,6 @@ class Yunbase():
         self.PrintColor("fit......",color=Fore.GREEN)
         self.PrintColor("load train data")
         self.load_data(path_or_file=train_path_or_file,mode='train')
-        self.weight_col=weight_col
-        if self.weight_col not in self.train.columns:
-            self.train[self.weight_col]=1
         self.sample_weight=self.train[self.weight_col]
         self.train.drop([self.weight_col],axis=1,inplace=True)
         self.target_dtype=self.train[self.target_col].dtype
@@ -1738,7 +1762,21 @@ class Yunbase():
             self.PrintColor("model training")
             for (model,model_name) in self.models:
                 oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,repeat=repeat,kf_folds=kf_folds,
-                                                             model=copy.deepcopy(model),model_name=model_name,sample_weight=self.sample_weight,use_optuna=False)
+                                                             model=copy.deepcopy(model),model_name=model_name,
+                                                             sample_weight=self.sample_weight,use_optuna=False,
+                                                             num_folds=self.num_folds,CV_FE=self.CV_FE,
+                                                             num_classes=self.num_classes,objective=self.objective,
+                                                             log=self.log,use_pseudo_label=self.use_pseudo_label,
+                                                             test=self.test,group_col=self.group_col,target_col=self.target_col,
+                                                             category_cols=self.category_cols,
+                                                             use_data_augmentation=self.use_data_augmentation,
+                                                             CV_sample=self.CV_sample,device=self.device,
+                                                             early_stop=self.early_stop,use_eval_metric=self.use_eval_metric,
+                                                             lgb_eval_metric=self.lgb_eval_metric,xgb_eval_metric=self.xgb_eval_metric,
+                                                             plot_feature_importance=self.plot_feature_importance,
+                                                             exp_mode=self.exp_mode,exp_mode_b=self.exp_mode_b,
+                                                             use_CIR=self.use_CIR,metric=self.metric,Metric=self.Metric
+                                                            )
                 if self.use_oof_as_feature:
                     if self.objective=='regression':
                         X[f'{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_oof_preds']=oof_preds
@@ -1813,15 +1851,15 @@ class Yunbase():
         #calculate oof score if save_oof_preds
         self.cal_final_score(weights)
         
-        self.PrintColor("load test data")
-        self.load_data(test_path_or_file,mode='test')
-        print(f"test.shape:{self.test.shape}")
-        
-        self.PrintColor("Feature Engineer")
-        self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
-        self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
-        self.PrintColor("prediction on test data")
         if self.objective=='regression':
+            self.PrintColor("load test data")
+            self.load_data(test_path_or_file,mode='test')
+            print(f"test.shape:{self.test.shape}")
+            
+            self.PrintColor("Feature Engineer")
+            self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
+            self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
+            self.PrintColor("prediction on test data")
             test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test)))
             for idx in range(len(self.trained_models)): 
                 test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
@@ -1848,7 +1886,7 @@ class Yunbase():
                 self.test[self.target_col]=test_preds
                 self.trained_models=[]
                 self.trained_CIR=[]
-                self.fit(self.train_path_or_file,self.weight_col,self.category_cols)
+                self.fit(self.train_path_or_file,self.category_cols)
                 #calculate oof score if save_oof_preds
                 self.cal_final_score(weights)
                 
@@ -1872,58 +1910,64 @@ class Yunbase():
                 test_preds=np.expm1(test_preds)-self.exp_mode_b       
             return test_preds
         else:#classification 
-            test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
-            for idx in range(len(self.trained_models)):
-                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds))
-                try:
-                    test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
-                except:
-                    test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
-                    test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
-                test_preds[idx]=test_pred
-                if self.use_oof_as_feature and idx%self.num_folds==self.num_folds-1:
-                    for c in range(self.num_classes):
-                        self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds_class{c}']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)[:,c]
-                        
-            if self.save_test_preds:
-                np.save(self.model_save_path+'test_preds.npy',test_preds)
-            test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
-            
-            #use pseudo label
-            if self.use_pseudo_label:
-                self.test[self.target_col]=np.argmax(test_preds,axis=1)
-                self.trained_models=[]
-                self.fit(self.train_path_or_file,self.weight_col,self.category_cols,self.target2idx)
-                #calculate oof score if save_oof_preds
-                self.cal_final_score(weights)
-
-                test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
-                fold=0
-                for idx in range(len(self.trained_models)):
-                    test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds, repeat=idx//(len(self.models)*self.num_folds))
-                    try:
-                        test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
-                    except:
-                        test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
-                        test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
-                    test_preds[fold]=test_pred
-                    fold+=1
-                if self.save_test_preds:
-                    np.save(self.model_save_path+'test_preds.npy',test_preds)
-                test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
-            self.PrintColor(f"idx2target={self.idx2target}",color=Fore.RED)
-            self.pickle_dump(self.idx2target,self.model_save_path+'idx2target.pkl')
+            #(len(self.test),self.num_classes)
+            test_preds=self.predict_proba(test_path_or_file,weights)
             if self.metric=='auc':
                 return test_preds[:,1]
-            test_preds=np.argmax(test_preds,axis=1)
-            return test_preds
+            else:
+                return np.argmax(test_preds,axis=1)          
 
     def predict_proba(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)->np.array:
-        self.save_test_preds=True
-        test_preds=self.predict(test_path_or_file,weights)
-        test_proba=np.load(self.model_save_path+'test_preds.npy')
-        test_proba=test_proba.mean(axis=0)
-        return test_proba
+        self.PrintColor("load test data")
+        self.load_data(test_path_or_file,mode='test')
+        print(f"test.shape:{self.test.shape}")
+        
+        self.PrintColor("Feature Engineer")
+        self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
+        self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
+        self.PrintColor("prediction on test data")
+        test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
+        for idx in range(len(self.trained_models)):
+            test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds))
+            try:
+                test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
+            except:
+                test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
+                test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
+            test_preds[idx]=test_pred
+            if self.use_oof_as_feature and idx%self.num_folds==self.num_folds-1:
+                for c in range(self.num_classes):
+                    self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds_class{c}']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)[:,c]
+                    
+        if self.save_test_preds:
+            np.save(self.model_save_path+'test_preds.npy',test_preds)
+        test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
+        
+        #use pseudo label
+        if self.use_pseudo_label:
+            self.test[self.target_col]=np.argmax(test_preds,axis=1)
+            self.trained_models=[]
+            self.fit(self.train_path_or_file,self.category_cols,self.target2idx)
+            #calculate oof score if save_oof_preds
+            self.cal_final_score(weights)
+            test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
+            fold=0
+            for idx in range(len(self.trained_models)):
+                test_copy=self.CV_FE(self.test.copy(),mode='test',fold=idx%self.num_folds, repeat=idx//(len(self.models)*self.num_folds))
+                try:
+                    test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
+                except:
+                    test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
+                    test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
+                test_preds[fold]=test_pred
+                fold+=1
+            if self.save_test_preds:
+                np.save(self.model_save_path+'test_preds.npy',test_preds)
+            test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
+        self.PrintColor(f"idx2target={self.idx2target}",color=Fore.RED)
+        self.pickle_dump(self.idx2target,self.model_save_path+'idx2target.pkl')
+        
+        return test_preds        
         
     #ensemble some solutions.
     def ensemble(self,solution_paths_or_files:list[str]=[],weights=None):
@@ -1998,5 +2042,6 @@ class Yunbase():
             if self.metric!='auc':
                 submission[self.target_col]=submission[self.target_col].apply(lambda x:self.idx2target[x])
         #deal with bool.
-        submission[self.target_col]=submission[self.target_col].astype(self.target_dtype)
+        if self.metric!='auc':
+            submission[self.target_col]=submission[self.target_col].astype(self.target_dtype)
         submission.to_csv(f"{save_name}.csv",index=None)
