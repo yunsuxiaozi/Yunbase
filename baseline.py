@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/10
+@update_time:2024/12/13
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -674,11 +674,82 @@ class Yunbase():
 
         if len(self.feats_stat):
             print("< groupby feature >")
-            for items in self.feats_stat:
+            for items in tqdm(self.feats_stat):
                 group_col,feature_col,AGGREGATIONS=items
-                agg_df = df[[group_col,feature_col]].groupby(group_col).agg(AGGREGATIONS)
+                #simple agg or cross agg
+                agg1,agg2=[],[]
+                for agg in AGGREGATIONS:
+                    if type(agg)==str:
+                        agg_name=agg
+                    else:#function
+                        agg_name=agg.__name__
+                    if ('+' in agg_name) or ('-' in agg_name) or ('*' in agg_name) or ('/' in agg_name):
+                        agg2.append(agg)
+                    else:
+                        agg1.append(agg)
+                #deal with agg1
+                agg_df = df[[group_col,feature_col]].groupby(group_col).agg(agg1)
                 agg_df.columns = ['_'.join(x) for x in agg_df.columns]
                 df=df.merge(agg_df,on=group_col,how='left')
+                #deal with agg2
+                for agg in agg2:
+                    if agg=='max-min':
+                        if f'{feature_col}_max' in df.columns and f'{feature_col}_min' in df.columns:
+                            df[f'{feature_col}_ptp']=df[f'{feature_col}_max']-df[f'{feature_col}_min']
+                        else:
+                            raise ValueError(f"max and min must in {feature_col}'s AGGREGATIONS.")
+            
+                    elif agg=='mean/std':
+                        if f'{feature_col}_mean' in df.columns and f'{feature_col}_std' in df.columns:
+                            df[f'{feature_col}_mean_divide_std']=df[f'{feature_col}_mean']/(df[f'{feature_col}_std']+self.eps)
+                        else:
+                            raise ValueError(f"mean and std must in {feature_col}'s AGGREGATIONS.")
+
+                    elif agg=='(x-mean)/std':
+                        if f'{feature_col}_mean' in df.columns and f'{feature_col}_std' in df.columns:
+                           df[f'{feature_col}-{feature_col}_mean_divide_std']=(df[f'{feature_col}']-df[f'{feature_col}_mean'])/(df[f'{feature_col}_std']+self.eps)
+                        else:
+                           raise ValueError(f"mean and std must in {feature_col}'s AGGREGATIONS.")
+                    else:
+                        if '+' in agg:
+                            #example:['mean','std']
+                            split_agg=agg.split('+')
+                            if f'{feature_col}_{split_agg[0]}' in df.columns and f'{feature_col}_{split_agg[1]}' in df.columns:
+                                df[f'{feature_col}_{split_agg[0]}+{feature_col}_{split_agg[1]}']=\
+                                df[f'{feature_col}_{split_agg[0]}']+df[f'{feature_col}_{split_agg[1]}']
+                            else:
+                                raise ValueError(f"{split_agg[0]} and {split_agg[1]} must in {feature_col}'s AGGREGATIONS.")
+                        
+                        elif '-' in agg:
+                            #example:['mean','std']
+                            split_agg=agg.split('-')
+                            if f'{feature_col}_{split_agg[0]}' in df.columns and f'{feature_col}_{split_agg[1]}' in df.columns:
+                                df[f'{feature_col}_{split_agg[0]}-{feature_col}_{split_agg[1]}']=\
+                                df[f'{feature_col}_{split_agg[0]}']-df[f'{feature_col}_{split_agg[1]}']
+                            else:
+                                raise ValueError(f"{split_agg[0]} and {split_agg[1]} must in {feature_col}'s AGGREGATIONS.")   
+
+                        elif '*' in agg:
+                            #example:['mean','std']
+                            split_agg=agg.split('*')
+                            if f'{feature_col}_{split_agg[0]}' in df.columns and f'{feature_col}_{split_agg[1]}' in df.columns:
+                                df[f'{feature_col}_{split_agg[0]}*{feature_col}_{split_agg[1]}']=\
+                                df[f'{feature_col}_{split_agg[0]}']*df[f'{feature_col}_{split_agg[1]}']
+                            else:
+                                raise ValueError(f"{split_agg[0]} and {split_agg[1]} must in {feature_col}'s AGGREGATIONS.")  
+
+                        elif '/' in agg:
+                            #example:['mean','std']
+                            split_agg=agg.split('/')
+                            if f'{feature_col}_{split_agg[0]}' in df.columns and f'{feature_col}_{split_agg[1]}' in df.columns:
+                                df[f'{feature_col}_{split_agg[0]}_divide_{feature_col}_{split_agg[1]}']=\
+                                df[f'{feature_col}_{split_agg[0]}']/(df[f'{feature_col}_{split_agg[1]}']+self.eps)
+                            else:
+                                raise ValueError(f"{split_agg[0]} and {split_agg[1]} must in {feature_col}'s AGGREGATIONS.")  
+
+                        else:
+                            raise ValueError(f"Yunbase can't support {agg}")  
+   
         
         if len(self.word2vec_models):#word2vec transform
             self.word2vec_cols=[]
@@ -1516,7 +1587,7 @@ class Yunbase():
         #Here we choose 0.99,other feature with high correlation can use Dimensionality reduction such as PCA.
         #if you want to delete other feature with high correlation,add into drop_cols when init.
         numerical_cols=[col for col in df.columns \
-                        if (col not in [self.target_col,self.group_col]) \
+                        if (col not in [self.target_col,self.group_col,self.weight_col]) \
                         and str(df[col].dtype) not in ['object','category']]
         corr_matrix=df[numerical_cols].corr().values
         drop_cols=[]
@@ -1834,24 +1905,23 @@ class Yunbase():
                 test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size])
         return test_preds
     
-    def predict(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)->np.array:
-        self.PrintColor("predict......",color=Fore.GREEN)
-        #weights:[1]*len(self.models)
-        n=len(self.models)
-        #if you don't set weights,then calculate mean value as result.
-        if weights==None:
-            weights=np.ones(n)
-        if len(weights)!=n:
-            raise ValueError(f"length of weights must be {len(self.models)}.")
-        self.PrintColor("weight normalization")
-        weights=np.array([w for w in weights for f in range(self.num_folds) for r in range(self.n_repeats)],dtype=np.float32)
-        #normalization
-        weights=weights*(self.num_folds*self.n_repeats*n)/np.sum(weights)
-
-        #calculate oof score if save_oof_preds
-        self.cal_final_score(weights)
-        
+    def predict(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=np.zeros(0))->np.array:
         if self.objective=='regression':
+            self.PrintColor("predict......",color=Fore.GREEN)
+            #weights:[1]*len(self.models)
+            n=len(self.models)
+            #if you don't set weights,then calculate mean value as result.
+            if len(weights)==0:
+                weights=np.ones(n)
+            if len(weights)!=n:
+                raise ValueError(f"length of weights must be {len(self.models)}.")
+            self.PrintColor("weight normalization")
+            weights=np.array([w for w in weights for f in range(self.num_folds) for r in range(self.n_repeats)],dtype=np.float32)
+            #normalization
+            weights=weights*(self.num_folds*self.n_repeats*n)/np.sum(weights)
+    
+            #calculate oof score if save_oof_preds
+            self.cal_final_score(weights)
             self.PrintColor("load test data")
             self.load_data(test_path_or_file,mode='test')
             print(f"test.shape:{self.test.shape}")
@@ -1917,7 +1987,23 @@ class Yunbase():
             else:
                 return np.argmax(test_preds,axis=1)          
 
-    def predict_proba(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)->np.array:
+    def predict_proba(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=np.zeros(0))->np.array:
+        self.PrintColor("predict......",color=Fore.GREEN)
+        #weights:[1]*len(self.models)
+        n=len(self.models)
+        #if you don't set weights,then calculate mean value as result.
+        if len(weights)==0:
+            weights=np.ones(n)
+        if len(weights)!=n:
+            raise ValueError(f"length of weights must be {len(self.models)}.")
+        self.PrintColor("weight normalization")
+        weights=np.array([w for w in weights for f in range(self.num_folds) for r in range(self.n_repeats)],dtype=np.float32)
+        #normalization
+        weights=weights*(self.num_folds*self.n_repeats*n)/np.sum(weights)
+
+        #calculate oof score if save_oof_preds
+        self.cal_final_score(weights)
+        
         self.PrintColor("load test data")
         self.load_data(test_path_or_file,mode='test')
         print(f"test.shape:{self.test.shape}")
