@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/13
+@update_time:2024/12/15
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -30,6 +30,7 @@ import ast#parse Python list strings  transform '[a,b,c]' to [a,b,c]
 import copy#copy object
 import gc#rubbish collection
 import dill#serialize and deserialize objects (such as saving and loading tree models)
+from spellchecker import SpellChecker# spelling checker library
 from colorama import Fore, Style #print colorful text
 import os#interact with operation system
 
@@ -100,6 +101,7 @@ class Yunbase():
                       use_scaler:bool=False,
                       use_eval_metric:bool=True,
                       feats_stat:list[tuple]=[],
+                      use_spellchecker:bool=False,
                       AGGREGATIONS:list=['nunique','count','min','max','first',
                                            'last', 'mean','median','sum','std','skew',kurtosis],
                 )->None:
@@ -165,6 +167,7 @@ class Yunbase():
         use_eval_metric       : use 'eval_metric' when training lightgbm or xgboost.
         feats_stat            : (group_col,feature_col,aggregation_list)
                                example:feats_stat = [ ('id','up_time', ['min', 'max'])   ]
+        use_spellchecker      :use SpellChecker to correct word in text.
         AGGREGATIONS          :['nunique','count','min','max','first','last',
                                'mean','median','sum','std','skew',kurtosis,q1,q3],
         """
@@ -176,7 +179,9 @@ class Yunbase():
                                 'accuracy','multi_logloss',#multi_class or classification
                                ]
         #current supported models
-        self.supported_models=['lgb','cat','xgb','ridge','LinearRegression','LogisticRegression','tabnet']
+        self.supported_models=['lgb','cat','xgb','ridge','LinearRegression','LogisticRegression','tabnet',
+                                'Word2Vec','tfidfvec','countvec',
+                              ]
         #current supported kfold.
         self.supported_kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold','purged_CV']
         #current supported objective.
@@ -271,10 +276,12 @@ class Yunbase():
         self.use_median_as_pred=use_median_as_pred
         self.use_scaler=use_scaler
         self.use_eval_metric=use_eval_metric
+        self.use_spellchecker=use_spellchecker
 
         attritubes=['save_oof_preds','save_test_preds','exp_mode',
                     'use_reduce_memory','use_data_augmentation','use_scaler',
-                    'use_oof_as_feature','use_CIR','use_median_as_pred','use_eval_metric'
+                    'use_oof_as_feature','use_CIR','use_median_as_pred','use_eval_metric',
+                    'use_spellchecker'
                    ]
         for attr in attritubes:
             if getattr(self,attr) not in [True,False]:
@@ -387,7 +394,9 @@ class Yunbase():
         print('Memory usage after optimization is: {:.2f} MB'.format(end_mem))
         print('Decreased by {:.1f}%'.format(100 * (start_mem - end_mem) / start_mem))
         return df
-     
+
+
+    ############text preprocessor
     def clean_text(self,text:str='')->str:
         ############################## fix text #######################################################
         #transform emoji to " "+text+" ".
@@ -417,48 +426,135 @@ class Yunbase():
         text=text.strip()
         return text
 
+    def text2word(self,text:str='hello world!'):
+        return re.split(r'\.|\?|!|\s|\n|,',text)
+    def text2sentence(self,text:str='hello world!'):
+        return re.split(r'\.|\?|\!|\n',text)
+    def text2paragraph(self,text:str='hello world!'):
+        return text.split("\n")
     #3 text readable index 
     def ARI(self,text):
         characters=len(text)
-        words=len(re.split(' |\\n|\\.|\\?|\\!|\,',text))
-        sentence=len(re.split('\\.|\\?|\\!',text))
+        words=len(self.text2word(text))
+        sentence=len(self.text2sentence(text))
         ari_score=4.71*(characters/words)+0.5*(words/sentence)-21.43
         return ari_score
     def McAlpine_EFLAW(self,text):
-        W=len(re.split(' |\\n|\\.|\\?|\\!|\,',text))
-        S=len(re.split('\\.|\\?|\\!',text))
+        W=len(self.text2word(text))
+        S=len(self.text2sentence(text))
         mcalpine_eflaw_score=(W+S*W)/S
         return mcalpine_eflaw_score
     def CLRI(self,text):
         characters=len(text)
-        words=len(re.split(' |\\n|\\.|\\?|\\!|\,',text))#空格,换行符,句号,问号,感叹号,逗号分开.
-        sentence=len(re.split('\\.|\\?|\\!',text))#句号,问号,感叹号分开的句子.
+        words=len(self.text2word(text))
+        sentence=len(self.text2sentence(text))
         L=100*characters/words
         S=100*sentence/words
         clri_score=0.0588*L-0.296*S-15.8
         return clri_score
 
-    #https://www.kaggle.com/competitions/home-credit-credit-risk-model-stability/discussion/501577
-    def lgb_eval_metric(self,y_true,y_pred):
-        if self.exp_mode:
-            y_true,y_pred=np.expm1(y_true)-self.exp_mode_b,np.expm1(y_pred)-self.exp_mode_b
-        score=self.Metric(y_true,y_pred)
-        if self.custom_metric!=None:
-            return self.custom_metric.__name__,score, bool(self.optuna_direction=='maximize')
-        else:
-            direction='minimize'
-            if self.metric in self.direction2metric['maximize']:
-                direction='maximize'
-            return self.metric,score, bool(direction=='maximize')
-    def xgb_eval_metric(self,y_true,y_pred):
-        y_pred=y_pred.get_label()
-        if self.exp_mode:
-            y_true,y_pred=np.expm1(y_true)-self.exp_mode_b,np.expm1(y_pred)-self.exp_mode_b
-        score=self.Metric(y_true,y_pred)
-        if self.custom_metric!=None:
-            return self.custom_metric.__name__,score
-        else:
-            return self.metric,score
+    def text_correct(self,text:str='hello world!'):
+        spell = SpellChecker()
+        words = self.text2word(text)
+        punctuation=['.','?','!',' ','\n',',']
+        wordssplit=[text[i] for i in range(len(text)) if text[i] in punctuation]
+        fixed_words=[spell.correction(word) for word in words]
+        error_cnt=sum([1 for i in range(len(words)) if words[i]!=fixed_words[i]])
+        fixed_text=[]
+        for i in range(len(wordssplit)):
+            fixed_text.append(fixed_words[i])
+            fixed_text.append(wordssplit[i])
+        fixed_text="".join(fixed_text)
+        return error_cnt,fixed_text
+        
+    ############text Feature Engineer
+    def text_FE(self,df:pd.DataFrame,text_col:str='text'):
+        df['index']=np.arange(len(df))
+        #data processing
+        self.PrintColor(f"-> for column {text_col} text clean",color=Fore.YELLOW)
+        df[text_col]=(df[text_col].fillna('nan')).apply(lambda x:self.clean_text(x))
+        #correct text
+        if self.use_spellchecker:
+            self.PrintColor(f"-> for column {text_col} text correct",color=Fore.YELLOW)
+            texts=df[text_col].values
+            error_cnts=np.zeros(len(texts))
+            for i in tqdm(range(len(texts))):
+                error_cnts[i],texts[i]=self.text_correct(texts[i])
+            df[f'{text_col}_error_cnts']=error_cnts
+        
+        df[text_col+"_ARI"]=df[text_col].apply(lambda x:self.ARI(x))
+        df[text_col+"_CLRI"]=df[text_col].apply(lambda x:self.CLRI(x))
+        df[text_col+"_McAlpine_EFLAW"]=df[text_col].apply(lambda x:self.McAlpine_EFLAW(x))
+        #split by ps
+        ps='!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
+        for i in range(len(ps)):
+            df[text_col+f"split_ps{i}_count"]=df[text_col].apply(lambda x:len(x.split(ps[i])))
+
+        self.PrintColor(f"-> for column {text_col} word feature",color=Fore.RED)
+        text_col_word_df=df[['index',text_col]].copy()
+        #get word_list   [index,tcol,word_list]
+        text_col_word_df[f'{text_col}_word']=text_col_word_df[text_col].apply(lambda x:self.text2word(x))
+        #[index,single_word]
+        text_col_word_df=text_col_word_df.explode(f'{text_col}_word')[['index',f'{text_col}_word']]
+        #[index,single_word,single_word_len]
+        text_col_word_df[f'{text_col}_word_len'] = text_col_word_df[f'{text_col}_word'].apply(len)
+        #data clean [index,single_word,single_word_len]
+        text_col_word_df=text_col_word_df[text_col_word_df[f'{text_col}_word_len']!=0]
+        #for word features, extract the difference in length between the two words before and after.
+        group_cols=[f'{text_col}_word_len']
+        for gap in [1]:
+            for col in [f'{text_col}_word_len']:
+                text_col_word_df[f'{col}_diff{gap}']=text_col_word_df.groupby(['index'])[col].diff(gap)
+                group_cols.append(f'{col}_diff{gap}')
+        text_col_word_agg_df = text_col_word_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
+        text_col_word_agg_df.columns = ['_'.join(x) for x in text_col_word_agg_df.columns]
+        df=df.merge(text_col_word_agg_df,on='index',how='left')
+
+        self.PrintColor(f"-> for column {text_col} sentence feature",color=Fore.RED)
+        text_col_sent_df=df[['index',text_col]].copy()
+        #get sent_list   [index,tcol,sent_list]
+        text_col_sent_df[f'{text_col}_sent']=text_col_sent_df[text_col].apply(lambda x: self.text2sentence(x))
+        #[index,single_sent]
+        text_col_sent_df=text_col_sent_df.explode(f'{text_col}_sent')[['index',f'{text_col}_sent']]
+        #[index,single_sent,single_sent_len]
+        text_col_sent_df[f'{text_col}_sent_len'] = text_col_sent_df[f'{text_col}_sent'].apply(len)
+        text_col_sent_df[f'{text_col}_sent_word_count'] = text_col_sent_df[f'{text_col}_sent'].apply(lambda x:len(re.split('\\ |\\,',x)))
+        #data clean [index,single_sent,single_sent_len]
+        group_cols=[f'{text_col}_sent_len',f'{text_col}_sent_word_count']
+        for gcol in group_cols:
+            text_col_sent_df=text_col_sent_df[text_col_sent_df[gcol]!=0]
+        #for sent features, extract the difference in length between the two sents before and after.
+        for gap in [1]:
+            for col in [f'{text_col}_sent_len',f'{text_col}_sent_word_count']:
+                text_col_sent_df[f'{col}_diff{gap}']=text_col_sent_df.groupby(['index'])[col].diff(gap)
+                group_cols.append(f'{col}_diff{gap}')
+        text_col_sent_agg_df = text_col_sent_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
+        text_col_sent_agg_df.columns = ['_'.join(x) for x in text_col_sent_agg_df.columns]
+        df=df.merge(text_col_sent_agg_df,on='index',how='left')
+
+        self.PrintColor(f"-> for column {text_col} paragraph feature",color=Fore.RED)
+        text_col_para_df=df[['index',text_col]].copy()
+        #get para_list   [index,tcol,para_list]
+        text_col_para_df[f'{text_col}_para']=text_col_para_df[text_col].apply(lambda x: self.text2paragraph(x))
+        #[index,single_para]
+        text_col_para_df=text_col_para_df.explode(f'{text_col}_para')[['index',f'{text_col}_para']]
+        text_col_para_df[f'{text_col}_para_len'] = text_col_para_df[f'{text_col}_para'].apply(len)
+        text_col_para_df[f'{text_col}_para_sent_count'] = text_col_para_df[f'{text_col}_para'].apply(lambda x: len(re.split('\\.|\\?|\\!',x)))
+        text_col_para_df[f'{text_col}_para_word_count'] = text_col_para_df[f'{text_col}_para'].apply(lambda x: len(re.split('\\.|\\?|\\!\\ |\\,',x)))
+        #data clean [index,single_sent,single_sent_len]
+        group_cols=[f'{text_col}_para_len',f'{text_col}_para_sent_count',f'{text_col}_para_word_count']
+        for gcol in group_cols:
+            text_col_para_df=text_col_para_df[text_col_para_df[gcol]!=0]
+        #for sent features, extract the difference in length between the two sents before and after.
+        for gap in [1]:
+            for col in [f'{text_col}_para_len',f'{text_col}_para_sent_count',f'{text_col}_para_word_count']:
+                text_col_para_df[f'{col}_diff{gap}']=text_col_para_df.groupby(['index'])[col].diff(gap)
+                group_cols.append(f'{col}_diff{gap}')
+        text_col_para_agg_df = text_col_para_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
+        text_col_para_agg_df.columns = ['_'.join(x) for x in text_col_para_agg_df.columns]
+        df=df.merge(text_col_para_agg_df,on='index',how='left') 
+        df.drop(['index'],axis=1,inplace=True)
+        return df
         
     #basic Feature Engineer,mode='train' or 'test' ,drop_cols is other cols you want to delete.
     def base_FE(self,df:pd.DataFrame,mode:str='train',drop_cols:list[str]=[])->pd.DataFrame:
@@ -471,82 +567,8 @@ class Yunbase():
         #object that need to be dropped, so it needs to be placed before finding these columns.
         if len(self.text_cols):
             print("< text column's feature >")
-            df['index']=np.arange(len(df))
             for tcol in self.text_cols:  
-                #data processing
-                df[tcol]=(df[tcol].fillna('nan')).apply(lambda x:self.clean_text(x))
-                df[tcol+"_ARI"]=df[tcol].apply(lambda x:self.ARI(x))
-                df[tcol+"_CLRI"]=df[tcol].apply(lambda x:self.CLRI(x))
-                df[tcol+"_McAlpine_EFLAW"]=df[tcol].apply(lambda x:self.McAlpine_EFLAW(x))
-                #split by ps
-                ps='!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
-                for i in range(len(ps)):
-                    df[tcol+f"split_ps{i}_count"]=df[tcol].apply(lambda x:len(x.split(ps[i])))
-                
-                self.PrintColor(f"-> for column {tcol} word feature",color=Fore.RED)
-                tcol_word_df=df[['index',tcol]].copy()
-                #get word_list   [index,tcol,word_list]
-                tcol_word_df[f'{tcol}_word']=tcol_word_df[tcol].apply(lambda x: re.split('\\.|\\?|\\!\\ |\\,',x))
-                #[index,single_word]
-                tcol_word_df=tcol_word_df.explode(f'{tcol}_word')[['index',f'{tcol}_word']]
-                #[index,single_word,single_word_len]
-                tcol_word_df[f'{tcol}_word_len'] = tcol_word_df[f'{tcol}_word'].apply(len)
-                #data clean [index,single_word,single_word_len]
-                tcol_word_df=tcol_word_df[tcol_word_df[f'{tcol}_word_len']!=0]
-                #for word features, extract the difference in length between the two words before and after.
-                group_cols=[f'{tcol}_word_len']
-                for gap in [1]:
-                    for col in [f'{tcol}_word_len']:
-                        tcol_word_df[f'{col}_diff{gap}']=tcol_word_df.groupby(['index'])[col].diff(gap)
-                        group_cols.append(f'{col}_diff{gap}')
-                tcol_word_agg_df = tcol_word_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
-                tcol_word_agg_df.columns = ['_'.join(x) for x in tcol_word_agg_df.columns]
-                df=df.merge(tcol_word_agg_df,on='index',how='left')
-                
-                self.PrintColor(f"-> for column {tcol} sentence feature",color=Fore.RED)
-                tcol_sent_df=df[['index',tcol]].copy()
-                #get sent_list   [index,tcol,sent_list]
-                tcol_sent_df[f'{tcol}_sent']=tcol_sent_df[tcol].apply(lambda x: re.split('\\.|\\?|\\!',x))
-                #[index,single_sent]
-                tcol_sent_df=tcol_sent_df.explode(f'{tcol}_sent')[['index',f'{tcol}_sent']]
-                #[index,single_sent,single_sent_len]
-                tcol_sent_df[f'{tcol}_sent_len'] = tcol_sent_df[f'{tcol}_sent'].apply(len)
-                tcol_sent_df[f'{tcol}_sent_word_count'] = tcol_sent_df[f'{tcol}_sent'].apply(lambda x:len(re.split('\\ |\\,',x)))
-                #data clean [index,single_sent,single_sent_len]
-                group_cols=[f'{tcol}_sent_len',f'{tcol}_sent_word_count']
-                for gcol in group_cols:
-                    tcol_sent_df=tcol_sent_df[tcol_sent_df[gcol]!=0]
-                #for sent features, extract the difference in length between the two sents before and after.
-                for gap in [1]:
-                    for col in [f'{tcol}_sent_len',f'{tcol}_sent_word_count']:
-                        tcol_sent_df[f'{col}_diff{gap}']=tcol_sent_df.groupby(['index'])[col].diff(gap)
-                        group_cols.append(f'{col}_diff{gap}')
-                tcol_sent_agg_df = tcol_sent_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
-                tcol_sent_agg_df.columns = ['_'.join(x) for x in tcol_sent_agg_df.columns]
-                df=df.merge(tcol_sent_agg_df,on='index',how='left')
-                
-                self.PrintColor(f"-> for column {tcol} paragraph feature",color=Fore.RED)
-                tcol_para_df=df[['index',tcol]].copy()
-                #get para_list   [index,tcol,para_list]
-                tcol_para_df[f'{tcol}_para']=tcol_para_df[tcol].apply(lambda x: x.split("\n"))
-                #[index,single_para]
-                tcol_para_df=tcol_para_df.explode(f'{tcol}_para')[['index',f'{tcol}_para']]
-                tcol_para_df[f'{tcol}_para_len'] = tcol_para_df[f'{tcol}_para'].apply(len)
-                tcol_para_df[f'{tcol}_para_sent_count'] = tcol_para_df[f'{tcol}_para'].apply(lambda x: len(re.split('\\.|\\?|\\!',x)))
-                tcol_para_df[f'{tcol}_para_word_count'] = tcol_para_df[f'{tcol}_para'].apply(lambda x: len(re.split('\\.|\\?|\\!\\ |\\,',x)))
-                #data clean [index,single_sent,single_sent_len]
-                group_cols=[f'{tcol}_para_len',f'{tcol}_para_sent_count',f'{tcol}_para_word_count']
-                for gcol in group_cols:
-                    tcol_para_df=tcol_para_df[tcol_para_df[gcol]!=0]
-                #for sent features, extract the difference in length between the two sents before and after.
-                for gap in [1]:
-                    for col in [f'{tcol}_para_len',f'{tcol}_para_sent_count',f'{tcol}_para_word_count']:
-                        tcol_para_df[f'{col}_diff{gap}']=tcol_para_df.groupby(['index'])[col].diff(gap)
-                        group_cols.append(f'{col}_diff{gap}')
-                tcol_para_agg_df = tcol_para_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
-                tcol_para_agg_df.columns = ['_'.join(x) for x in tcol_para_agg_df.columns]
-                df=df.merge(tcol_para_agg_df,on='index',how='left') 
-            df.drop(['index'],axis=1,inplace=True)
+                df=self.text_FE(df,tcol)
         
         if mode=='train':
             #missing value 
@@ -1233,7 +1255,7 @@ class Yunbase():
                         for idx in range(len(X_train_columns)):
                             if X_train[X_train_columns[idx]].dtype=='category':
                                 cat_idxs.append(idx)
-                                cat_dims.append(train[X_train_columns[idx]].nunique())
+                                cat_dims.append(self.train[X_train_columns[idx]].nunique())
                                 X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)          
                         params=model.get_params()
                         params['cat_idxs']=cat_idxs
@@ -1291,7 +1313,7 @@ class Yunbase():
                         CV_score.append(self.Metric(y_valid,valid_pred,valid_weight))
                     else:
                         CV_score.append(self.Metric(y_valid,valid_pred)) 
-                    
+
                     if 'tabnet' not in model_name:
                         self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}.model')
                     metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
@@ -1343,7 +1365,7 @@ class Yunbase():
                 for idx in range(len(X_train_columns)):
                     if X_train[X_train_columns[idx]].dtype=='category':
                         cat_idxs.append(idx)
-                        cat_dims.append(train[X_train_columns[idx]].nunique())
+                        cat_dims.append(self.train[X_train_columns[idx]].nunique())
                         X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
                          
                 params=model.get_params()
@@ -1384,6 +1406,28 @@ class Yunbase():
         if self.exp_mode:
             test_preds=np.expm1(test_preds)-self.exp_mode_b
         return test_preds
+
+    #https://www.kaggle.com/competitions/home-credit-credit-risk-model-stability/discussion/501577
+    def lgb_eval_metric(self,y_true,y_pred):
+        if self.exp_mode:
+            y_true,y_pred=np.expm1(y_true)-self.exp_mode_b,np.expm1(y_pred)-self.exp_mode_b
+        score=self.Metric(y_true,y_pred)
+        if self.custom_metric!=None:
+            return self.custom_metric.__name__,score, bool(self.optuna_direction=='maximize')
+        else:
+            direction='minimize'
+            if self.metric in self.direction2metric['maximize']:
+                direction='maximize'
+            return self.metric,score, bool(direction=='maximize')
+    def xgb_eval_metric(self,y_true,y_pred):
+        y_pred=y_pred.get_label()
+        if self.exp_mode:
+            y_true,y_pred=np.expm1(y_true)-self.exp_mode_b,np.expm1(y_pred)-self.exp_mode_b
+        score=self.Metric(y_true,y_pred)
+        if self.custom_metric!=None:
+            return self.custom_metric.__name__,score
+        else:
+            return self.metric,score
     
     # return oof_preds and metric_score
     # can use optuna to find params.If use optuna,then not save models.

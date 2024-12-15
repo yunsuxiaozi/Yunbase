@@ -20,3 +20,4 @@ pytorch_tabnet
 matplotlib
 seaborn
 cir-model
+pyspellchecker
