@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/15
+@update_time:2024/12/16
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -966,15 +966,31 @@ class Yunbase():
                 return 1-np.sum ((y_true-y_pred)**2)/np.sum ((y_true-np.mean(y_true))**2)
         else:
             if self.metric=='accuracy':
-                y_pred=np.argmax(y_pred,axis=1)#transform probability to label
+                #lgb_eval_metric or Metric(target,oof_preds)?
+                try:
+                    y_pred=np.argmax(y_pred,axis=1)#transform probability to label
+                except:
+                    pass
                 return np.mean(y_true==y_pred)
             elif self.metric=='auc':
-                return roc_auc_score(y_true,y_pred[:,1])
+                #lgb_eval_metric or Metric(target,oof_preds)?
+                try:
+                    return roc_auc_score(y_true,y_pred[:,1])
+                except:
+                    return roc_auc_score(y_true,y_pred)
             elif self.metric=='f1_score':
-                y_pred=np.argmax(y_pred,axis=1)#transform probability to label
+                #lgb_eval_metric or Metric(target,oof_preds)?
+                try:
+                    y_pred=np.argmax(y_pred,axis=1)#transform probability to label
+                except:
+                    pass
                 return f1_score(y_true, y_pred)
             elif self.metric=='mcc':
-                y_pred=np.argmax(y_pred,axis=1)#transform probability to label
+                #lgb_eval_metric or Metric(target,oof_preds)?
+                try:
+                    y_pred=np.argmax(y_pred,axis=1)#transform probability to label
+                except:
+                    pass
                 return matthews_corrcoef(y_true, y_pred)
             elif self.metric in ['logloss','multi_logloss']:
                 y_true=np.eye(self.num_classes)[y_true]
@@ -1625,6 +1641,44 @@ class Yunbase():
         
         metric_score=Metric(y,oof_preds)
         return oof_preds,metric_score
+
+    #https://www.kaggle.com/code/carlmcbrideellis/what-is-adversarial-validation
+    #This function does not perform any feature engineering.
+    def adversarial_validation(self,train:pd.DataFrame,test:pd.DataFrame,
+                                    target_col:str='target'):
+        #drop object cols
+        object_cols=[col for col in train.columns if col!=target_col and train[col].dtype==object]
+        train.drop(object_cols,axis=1,inplace=True)
+        test.drop(object_cols,axis=1,inplace=True)
+
+        train.drop([target_col],axis=1,inplace=True)
+        test.drop([target_col],axis=1,inplace=True,errors='ignore')
+        train['is_test']=0
+        test['is_test']=1
+        total=pd.concat((train,test))
+        X=total.drop(['is_test'],axis=1)
+        y=total['is_test']
+        sample_weight=pd.DataFrame({"weight":np.ones(len(y))})['weight']
+        kf=StratifiedKFold(n_splits=5,random_state=2024,shuffle=True)     
+        kf_folds=pd.DataFrame({"fold":np.zeros(len(y))})
+        for fold, (train_index, valid_index) in (enumerate(kf.split(X,y))):
+            kf_folds['fold'][valid_index]=fold
+
+        temp_metric=self.metric
+        self.metric='auc'
+        self.cross_validation(X=X,y=y,group=None,kf_folds=kf_folds,
+                         model=LGBMClassifier(n_estimators=256,metric='auc'),
+                         model_name='lgb_adversarial_validation',
+                         sample_weight=sample_weight,
+                         use_optuna=False,repeat=0,num_folds=5,CV_FE=None,
+                         num_classes=2,objective='binary',
+                         log=100,use_pseudo_label=False,
+                         test=None,group_col=None,target_col='is_test',
+                         category_cols=[],device=self.device,
+                         early_stop=100,plot_feature_importance=True,
+                         metric='auc',Metric=self.Metric)
+        self.metric=temp_metric
+        self.trained_models=[]
     
     def drop_high_correlation_feats(self,df:pd.DataFrame)->None:
         #target_col and group_col is for model training,don't delete.object feature is string.
@@ -1734,7 +1788,7 @@ class Yunbase():
                     metric='multi_logloss'
             if metric=='accuracy':
                 metric='auc'
-            lgb_params={"boosting_type": "gbdt","metric": 'None',
+            lgb_params={"boosting_type": "gbdt","metric": metric,
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.1,
                         "n_estimators": 20000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
                         "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
