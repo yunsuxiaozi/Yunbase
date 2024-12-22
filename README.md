@@ -45,6 +45,7 @@ yunbase=Yunbase(  num_folds:int=5,
                   CV_sample=None,
                   group_col=None,
                   target_col:str='target',
+                  weight_col:str='weight',
                   drop_cols:list[str]=[],
                   seed:int=2024,
                   objective:str='regression',
@@ -78,6 +79,9 @@ yunbase=Yunbase(  num_folds:int=5,
                   use_CIR:bool=False,
                   use_median_as_pred:bool=False,
                   use_scaler:bool=False,
+                  use_eval_metric:bool=True,
+                  feats_stat:list[tuple]=[],
+                  use_spellchecker:bool=False,
                   AGGREGATIONS:list=['nunique','count','min','max','first',
                                      'last','mean','median','sum','std','skew',kurtosis],
     )
@@ -105,26 +109,42 @@ yunbase=Yunbase(  num_folds:int=5,
 
 
 
-- CV_sample:<b>function</b>.You can customize your downsampling and oversampling operations inside.
+- CV_sample:<b>function</b>.You can customize your downsampling and oversampling operations inside.In order to ensure the accuracy of CV, operations on the validation set should not be performed in principle. However, in order to make it more universal, operations on the validation set are still allowed here In addition to sampling operations, related feature engineering can also be customized here.
 
   For example:
 
   ```python
-  def CV_sample(X_train,y_train,train_weight):
-      negative_idx=np.where(y_train==0)[0]
+  def CV_sample(X_train,y_train,X_valid,y_valid,
+                sample_weight_train,sample_weight_valid):
+      negative_idx=list(np.where(y_train==0)[0])
+      positive_idx=list(np.where(y_train==1)[0])
+      np.random.shuffle(positive_idx)
+      positive_idx=positive_idx[:int(len(positive_idx)*0.9)]
       X_train_copy=X_train.iloc[negative_idx].copy()
       y_train_copy=y_train.iloc[negative_idx].copy()
-      X_train=pd.concat((X_train,X_train_copy)).reset_index(drop=True)
-      y_train=pd.concat((y_train,y_train_copy)).reset_index(drop=True)
-      train_weight=pd.concat((train_weight,train_weight[negative_idx])).reset_index(drop=True)
-      return X_train,y_train,train_weight
+      y_train_copy[:]=1
+      X_train=pd.concat((X_train.iloc[positive_idx+negative_idx],X_train_copy)).reset_index(drop=True)
+      y_train=pd.concat((y_train.iloc[positive_idx+negative_idx],y_train_copy)).reset_index(drop=True)
+      sample_weight_train=pd.concat((sample_weight_train.iloc[positive_idx+negative_idx],sample_weight_train.iloc[negative_idx])).reset_index(drop=True)
+      return X_train,y_train,X_valid,y_valid,sample_weight_train,sample_weight_valid
   ```
 
-  
+
+​      In purgedCV, in order to make the training set and test set closer, without a validation set, this function will become as follows:
+
+```
+def CV_sample(X_train,y_train,sample_weight_train):
+    return X_train,y_train,sample_weight_train
+```
+
+
+
 
 - group_col:<b>str</b>.if you want to use groupkfold,then define this group_col.
 
 - target_col:<b>str</b>.the column that you want to predict.
+
+- weight_col:<b>str</b>.You can set the weight of each sample during model training. If not defined by the user, 1 will be used by default to train each sample.
 
 - drop_cols:<b>list</b>.The column to be deleted after all feature engineering is completed.
 
@@ -194,26 +214,42 @@ yunbase=Yunbase(  num_folds:int=5,
 
 - use_scaler:<b>bool</b>.use robust scaler to deal with outlier.
 
+- use_eval_metric:<b>bool</b>.Use custom evaluation metric to evaluate models during training with lightgbm and xgboost.
+
+- feats_stat:Construct groupby features.for example: training data has some patients, testing data has other patients, each patient has multiple samples, this function can be used.
+
+     
+
+     ```python
+     feats_stat=
+     [('patient_id','year',['max','min','median','mean','std','skew',kurtosis,'(x-mean)/std','max-min','mean/std'])]
+     ```
+
+- use_spellchecker:<b>bool</b>.This is an immature feature that checks for word errors in text and then makes corrections. The main issue is that it takes too long time.
+
+
+
 6.yunbase training
 
 At present, it supports read csv, parquet files according to path, or csv files that have already been read.
 
 ```python
 yunbase.fit(train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
-            weight_col='weight',category_cols:list[str]=[],
+            category_cols:list[str]=[],date_cols:list[str]=[],
             target2idx:dict|None=None,
            )
+            
 ```
 
 - train_path_or_file:You can use the file path or pass in the already loaded file.
-- weight_col:If you want to weight the samples, you can add a column with train_weight named weight_col.
 - category_cols:You can specify which columns to convert to 'category' in the training data.
+- date_cols:If a column of features are all of time type, for example :"2024-04-23",this can be used to construct features.
 - target2idx:The dictionary mapped in the classification task, if you want to predict a person's gender, you can specify {'Male ': 0,' Female ': 1}.If you do not specify it yourself, it will be mapped to 0, 1,... n in order of the number of times each target appears.
 
 7.yunbase inference
 
 ```python
-test_preds=yunbase.predict(test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=None)
+test_preds=yunbase.predict(test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=np.zeros(0))
 ```
 
 - weights:This is setting the weights for model ensemble. For example, if you specify lgb, xgb, and cat, you can set weights to [3,4,3].
@@ -229,7 +265,7 @@ yunbase.submit(submission_path_or_file='submission.csv',test_preds=np.ones(3),sa
 9.ensemble
 
 ```python
-yunbase.ensemble(solution_paths_or_files,weights=None)
+yunbase.ensemble(solution_paths_or_files:list[str]=[],weights=None)
 ```
 
 - For example:
@@ -278,15 +314,21 @@ yunbase.purged_cross_validation(train_path_or_file:str|pd.DataFrame|pl.DataFrame
                                 train_date_range:int=0,test_date_range:int=0,
                                 category_cols:list[str]=[],
                                 use_seasonal_features:bool=True,
-                                weight_col:str='weight',
                                 use_weighted_metric:bool=False,
                                 only_inference:bool=False,
+                                timestep:str='day',
                            ) 
 ```
 
 - only_inference:If you don't want to see the offline scores of the time-series CV or want to save time, you can directly train the final submitted model.
 
 Demo notebook:<a href="https://www.kaggle.com/code/yunsuxiaozi/rsfc-yunbase">Rohlik Yunbase</a>
+
+
+
+## Adversarial Validation
+
+<a href='https://www.kaggle.com/code/yunsuxiaozi/tfug-yunbase-cv-0-5990-pb-0-5964'>demo notebook</a>
 
 ### follow-up work
 
@@ -316,4 +358,5 @@ Kaggle:https://www.kaggle.com/yunsuxiaozi
 
 
 
- update time:2024/12/08(baseline.py and README may not synchronize updates)
+ update time:2024/12/22(baseline.py and README may not synchronize updates)
+
