@@ -11,6 +11,7 @@ dill
 optuna
 colorama
 regex
+unidecode
 gensim
 scipy
 ftfy

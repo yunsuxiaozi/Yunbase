@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/16
+@update_time:2024/12/22
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -30,12 +30,13 @@ import ast#parse Python list strings  transform '[a,b,c]' to [a,b,c]
 import copy#copy object
 import gc#rubbish collection
 import dill#serialize and deserialize objects (such as saving and loading tree models)
-from spellchecker import SpellChecker# spelling checker library
 from colorama import Fore, Style #print colorful text
 import os#interact with operation system
 
 #deal with text
 import re#python's built-in regular expressions.
+from spellchecker import SpellChecker# spelling checker library
+from unidecode import unidecode#transform unicode to ASCII.
 #gene(topic) similarity   
 from gensim.models import Word2Vec
 from sklearn.feature_extraction.text import CountVectorizer,TfidfVectorizer#word2vec feature
@@ -174,7 +175,7 @@ class Yunbase():
         
         #currented supported metric
         self.supported_metrics=['custom_metric',#your custom_metric
-                                'mae','rmse','mse','medae','rmsle','msle','mape','r2',#regression
+                                'mae','rmse','mse','medae','rmsle','msle','mape','r2','smape',#regression
                                 'auc','logloss','f1_score','mcc',#binary metric
                                 'accuracy','multi_logloss',#multi_class or classification
                                ]
@@ -239,7 +240,7 @@ class Yunbase():
             'maximize':['accuracy','auc','f1_score','mcc',#classification
                         'r2'#regression
                        ],
-            'minimize':['medae','mape','mae','rmse','mse','rmsle','msle',#regression
+            'minimize':['medae','mape','mae','rmse','mse','rmsle','msle','smape',#regression
                         'logloss','multi_logloss'#classification
                        ]
         }
@@ -395,10 +396,11 @@ class Yunbase():
         print('Decreased by {:.1f}%'.format(100 * (start_mem - end_mem) / start_mem))
         return df
 
-
     ############text preprocessor
     def clean_text(self,text:str='')->str:
         ############################## fix text #######################################################
+        #transform “你好。” to 'NI HAO.'
+        text = unidecode(text)
         #transform emoji to " "+text+" ".
         text=emoji.demojize(text,delimiters=(" ", " "))
         #correct unicode issues.
@@ -930,6 +932,9 @@ class Yunbase():
                 left=len(pos_pro)
         auc_score=greater_sample_cnt/total_sample_cnt
         return auc_score
+
+    def Medae(self,y_true:np.array,y_pred:np.array):
+        return np.median(np.abs(y_true-y_pred))
     
     def Metric(self,y_true:np.array,y_pred:np.array,weight=np.zeros(0))->float:#for multi_class,labeland proability
         #due to the use of the reduce_mem function to reduce memory, it may result in over range after data addition.
@@ -949,7 +954,7 @@ class Yunbase():
                     return self.custom_metric(y_true,y_pred,weight)
         if self.objective=='regression':
             if self.metric=='medae':
-                return np.median(np.abs(y_true-y_pred))
+                return self.Medae(y_true,y_pred)
             elif self.metric=='mae':
                 return np.mean(np.abs(y_true-y_pred))
             elif self.metric=='rmse':
@@ -964,6 +969,8 @@ class Yunbase():
                 return np.mean(np.abs(y_pred-y_true)/y_true)
             elif self.metric=='r2':
                 return 1-np.sum ((y_true-y_pred)**2)/np.sum ((y_true-np.mean(y_true))**2)
+            elif self.metric=='smape':
+                return 200*np.mean(np.abs(y_true-y_pred) / (  np.abs(y_true)+np.abs(y_pred)+self.eps  ) )
         else:
             if self.metric=='accuracy':
                 #lgb_eval_metric or Metric(target,oof_preds)?
@@ -1101,17 +1108,35 @@ class Yunbase():
         else:#submission.csv
             return file
 
-    def construct_seasonal_feature(self,df:pd.DataFrame,date_col:str='date'):
-        df['dayofyear']=df[date_col]%365
-        df['dayofweek']=df[date_col]%7
-        df['month']=df[date_col]%365//31
-        df['sin_dayofweek']=np.sin(2*np.pi*df['dayofweek']/7)
-        df['cos_dayofweek']=np.cos(2*np.pi*df['dayofweek']/7)
-        df['sin_day']=np.sin(2*np.pi*df['dayofyear']/365)
-        df['cos_day']=np.cos(2*np.pi*df['dayofyear']/365)
-        df['sin_month']=np.sin(2*np.pi*df['month']/12)
-        df['cos_month']=np.cos(2*np.pi*df['month']/12)
-
+    #https://www.kaggle.com/code/yunsuxiaozi/posv-yunbase-purgedcv
+    def construct_seasonal_feature(self,df:pd.DataFrame,date_col:str='date',timestep:str='day'):
+        #df[date_col] second
+        if timestep=='second':
+            df[f'{date_col}_second']=df[date_col]%60
+            df[f"sin_{date_col}_second"]=np.sin(2*np.pi*df[f'{date_col}_second']/60)
+            df[f"cos_{date_col}_second"]=np.cos(2*np.pi*df[f'{date_col}_second']/60)
+        df[date_col]=df[date_col]//60
+        if timestep=='minute':
+            df[f'{date_col}_minute']=df[date_col]%60
+            df[f"sin_{date_col}_minute"]=np.sin(2*np.pi*df[f'{date_col}_minute']/60)
+            df[f"cos_{date_col}_minute"]=np.cos(2*np.pi*df[f'{date_col}_minute']/60)
+        df[date_col]=df[date_col]//60
+        if timestep=='hour':
+            df[f'{date_col}_hour']=df[date_col]%24
+            df[f"sin_{date_col}_hour"]=np.sin(2*np.pi*df[f'{date_col}_hour']/24)
+            df[f"cos_{date_col}_hour"]=np.cos(2*np.pi*df[f'{date_col}_hour']/24)
+        df[date_col]=df[date_col]//24   
+        if timestep=='day':
+            df[f'{date_col}_day']=df[date_col]%31+1
+            df[f"sin_{date_col}_day"]=np.sin(2*np.pi*df[f'{date_col}_day']/31)
+            df[f"cos_{date_col}_day"]=np.cos(2*np.pi*df[f'{date_col}_day']/31)
+        df[date_col]=df[date_col]//31
+        #month
+        df[f'{date_col}_month']=df[date_col]%12+1
+        df[f"sin_{date_col}_month"]=np.sin(2*np.pi*df[f'{date_col}_month']/12)
+        df[f"cos_{date_col}_month"]=np.cos(2*np.pi*df[f'{date_col}_month']/12)
+        #year
+        df[f'{date_col}_year']=df[date_col]//12+1970
         return df
 
     #https://www.kaggle.com/code/marketneutral/purged-time-series-cv-xgboost-optuna
@@ -1124,6 +1149,7 @@ class Yunbase():
                                 use_seasonal_features:bool=True,
                                 use_weighted_metric:bool=False,
                                 only_inference:bool=False,
+                                timestep:str='day',
                                ):
         """
         train_path_or_file/test_path_or_file:your train and test dataset.
@@ -1135,6 +1161,8 @@ class Yunbase():
         train_date_range                    :the days of data are included in the train data.
         test_date_range                     :the days of data are included in the test data.
         category_cols                       :You can define features that are category_cols.
+        timestep                            :Interval of time series data.'second',
+                                             'minute','hour'or'day'.
         """
         
         if self.use_pseudo_label:
@@ -1166,14 +1194,23 @@ class Yunbase():
                 self.train[self.date_col]=pd.to_datetime(self.train[self.date_col])
             if type(self.test.dropna()[self.date_col].values[0])==str:
                 self.test[self.date_col]=pd.to_datetime(self.test[self.date_col])
-            #transform 'date' to days.
-            min_date=self.train[self.date_col].min()
-            self.train[self.date_col]=(self.train[self.date_col]-min_date).dt.days
-            self.test[self.date_col]=(self.test[self.date_col]-min_date).dt.days
+            #transform 'date' to seconds.
+            self.train[self.date_col]=(self.train[self.date_col]-pd.to_datetime('1970-01-01')).dt.total_seconds()
+            self.test[self.date_col]=(self.test[self.date_col]-pd.to_datetime('1970-01-01')).dt.total_seconds()
         except:#df[date_col] is [0,1,2,……,n]
             min_date=self.train[self.date_col].min()
             self.train[self.date_col]=self.train[self.date_col]-min_date
             self.test[self.date_col]=self.test[self.date_col]-min_date
+            #transform (minute,hour,day) to seconds
+            if timestep=='minute':
+                self.train[self.date_col]=self.train[self.date_col]*60
+                self.test[self.date_col]=self.test[self.date_col]*60
+            if timestep=='hour':
+                self.train[self.date_col]=self.train[self.date_col]*3600
+                self.test[self.date_col]=self.test[self.date_col]*3600
+            if timestep=='day':
+                self.train[self.date_col]=self.train[self.date_col]*3600*24
+                self.test[self.date_col]=self.test[self.date_col]*3600*24
 
         if test_date_range==0:#date_range same as test_data
             test_date_range=self.test[self.date_col].max()-self.test[self.date_col].min()+1
@@ -1192,8 +1229,8 @@ class Yunbase():
         #Considering that some competitions may anonymize time,
         #the real year, month, and day features were not extracted here.
         if use_seasonal_features:
-            self.train=self.construct_seasonal_feature(self.train,self.date_col)
-            self.test=self.construct_seasonal_feature(self.test,self.date_col)
+            self.train=self.construct_seasonal_feature(self.train,self.date_col,timestep)
+            self.test=self.construct_seasonal_feature(self.test,self.date_col,timestep)
         
         train_columns=list(self.train.columns)
         
@@ -1480,6 +1517,7 @@ class Yunbase():
                 X_train=CV_FE(X_train,mode='train',fold=fold,repeat=repeat)
                 X_valid=CV_FE(X_valid,mode='test',fold=fold,repeat=repeat)
             sample_weight_train=sample_weight.iloc[train_index].reset_index(drop=True)
+            sample_weight_valid=sample_weight.iloc[valid_index].reset_index(drop=True)
 
             if (use_pseudo_label) and (type(test)==pd.DataFrame):
                 if CV_FE!=None:
@@ -1515,7 +1553,8 @@ class Yunbase():
                 gc.collect()
 
             if CV_sample!=None:
-                X_train,y_train,sample_weight_train=CV_sample(X_train,y_train,sample_weight_train)
+                X_train,y_train,X_valid,y_valid,sample_weight_train,sample_weight_valid=\
+                    CV_sample(X_train,y_train,X_valid,y_valid,sample_weight_train,sample_weight_valid)
                 
             if 'lgb' in model_name:
                 #gpu params isn't set
@@ -1705,7 +1744,7 @@ class Yunbase():
         return drop_cols
     
     def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
-            category_cols:list[str]=[],
+            category_cols:list[str]=[],date_cols:list[str]=[],
             target2idx:dict|None=None,
            ):
         if self.num_folds<2:#kfold must greater than 1
@@ -1716,9 +1755,17 @@ class Yunbase():
         #xgboost:https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/sklearn.py
         #category_cols:Convert string columns to 'category'.
         self.category_cols=self.colname_clean(category_cols)
+        self.date_cols=self.colname_clean(date_cols)
         self.PrintColor("fit......",color=Fore.GREEN)
         self.PrintColor("load train data")
         self.load_data(path_or_file=train_path_or_file,mode='train')
+        #process date_cols
+        for date_col in self.date_cols:
+            self.train[date_col]=pd.to_datetime(self.train[date_col])
+            self.train[date_col]=(self.train[date_col]-pd.to_datetime('1970-01-01')).dt.total_seconds()
+            self.train=self.construct_seasonal_feature(self.train,date_col,timestep='day')
+        self.train.drop(self.date_cols,axis=1,inplace=True)   
+        
         self.sample_weight=self.train[self.weight_col]
         self.train.drop([self.weight_col],axis=1,inplace=True)
         self.target_dtype=self.train[self.target_col].dtype
@@ -1726,11 +1773,11 @@ class Yunbase():
             self.train=self.train.drop_duplicates()
         except:
             pass
-        print(f"train.shape:{self.train.shape}")
         self.PrintColor("Feature Engineer")
         self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
         
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
+        print(f"train.shape:{X.shape}")
         y=self.train[self.target_col]
         
         #special characters in columns'name will lead to errors when GBDT model training.
@@ -1775,7 +1822,7 @@ class Yunbase():
             #lightgbm don't support f1_score,but we will calculate f1_score as Metric.
             if metric in ['f1_score','mcc','logloss']:
                 metric='auc'
-            elif metric in ['medae','mape']:
+            elif metric in ['medae','mape','smape']:
                 metric='mae'
             elif metric in ['rmsle','msle','r2']:
                 metric='mse'
@@ -1814,7 +1861,7 @@ class Yunbase():
             #catboost's metric
             # Valid options are:  'CrossEntropy', 'CtrFactor', 'Focal', 'RMSE', 'LogCosh', 
             # 'Lq','Quantile', 'MultiQuantile', 'Expectile', 'LogLinQuantile',
-            # 'Poisson', 'MSLE', 'MedianAbsoluteError', 'SMAPE', 'Huber', 'Tweedie', 'Cox', 
+            # 'Poisson', 'MSLE', 'MedianAbsoluteError', 'Huber', 'Tweedie', 'Cox', 
             # 'RMSEWithUncertainty', 'MultiClass', 'MultiClassOneVsAll', 'PairLogit', 'PairLogitPairwise',
             # 'YetiRank', 'YetiRankPairwise', 'QueryRMSE', 'GroupQuantile', 'QuerySoftMax', 
             # 'QueryCrossEntropy', 'StochasticFilter', 'LambdaMart', 'StochasticRank', 
@@ -1829,7 +1876,7 @@ class Yunbase():
             #catboost metric to params
             metric2params={#regression
                           'mse':'RMSE','rmsle':'RMSE','msle':'MSLE','rmse':'RMSE',
-                           'mae':'MAE','medae':'MAE','mape':'MAPE','r2':'R2',
+                           'mae':'MAE','medae':'MAE','mape':'MAPE','r2':'R2','smape':'SMAPE',
                           #classification
                            'accuracy':'Accuracy','logloss':'Logloss','multi_logloss':'Accuracy',
                            'f1_score':'F1','auc':'AUC','mcc':'MCC',
@@ -2022,11 +2069,17 @@ class Yunbase():
             self.cal_final_score(weights)
             self.PrintColor("load test data")
             self.load_data(test_path_or_file,mode='test')
-            print(f"test.shape:{self.test.shape}")
+            #process date_cols
+            for date_col in self.date_cols:
+                self.test[date_col]=pd.to_datetime(self.test[date_col])
+                self.test[date_col]=(self.test[date_col]-pd.to_datetime('1970-01-01')).dt.total_seconds()
+                self.test=self.construct_seasonal_feature(self.test,date_col,timestep='day')
+            self.test.drop(self.date_cols,axis=1,inplace=True)
             
             self.PrintColor("Feature Engineer")
             self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
             self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
+            print(f"test.shape:{self.test.shape}")
             self.PrintColor("prediction on test data")
             test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test)))
             for idx in range(len(self.trained_models)): 
@@ -2054,7 +2107,8 @@ class Yunbase():
                 self.test[self.target_col]=test_preds
                 self.trained_models=[]
                 self.trained_CIR=[]
-                self.fit(self.train_path_or_file,self.category_cols)
+                self.fit(self.train_path_or_file,self.category_cols,
+                     self.date_cols)
                 #calculate oof score if save_oof_preds
                 self.cal_final_score(weights)
                 
@@ -2104,11 +2158,17 @@ class Yunbase():
         
         self.PrintColor("load test data")
         self.load_data(test_path_or_file,mode='test')
-        print(f"test.shape:{self.test.shape}")
+        #process date_cols
+        for date_col in self.date_cols:
+            self.test[date_col]=pd.to_datetime(self.test[date_col])
+            self.test[date_col]=(self.test[date_col]-pd.to_datetime('1970-01-01')).dt.total_seconds()
+            self.test=self.construct_seasonal_feature(self.test,date_col,timestep='day')
+        self.test.drop(self.date_cols,axis=1,inplace=True)
         
         self.PrintColor("Feature Engineer")
         self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
         self.test=self.test.drop([self.group_col,self.target_col],axis=1,errors='ignore')
+        print(f"test.shape:{self.test.shape}")
         self.PrintColor("prediction on test data")
         test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
         for idx in range(len(self.trained_models)):
@@ -2131,7 +2191,8 @@ class Yunbase():
         if self.use_pseudo_label:
             self.test[self.target_col]=np.argmax(test_preds,axis=1)
             self.trained_models=[]
-            self.fit(self.train_path_or_file,self.category_cols,self.target2idx)
+            self.fit(self.train_path_or_file,self.category_cols,
+                     self.date_cols,self.target2idx)
             #calculate oof score if save_oof_preds
             self.cal_final_score(weights)
             test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
