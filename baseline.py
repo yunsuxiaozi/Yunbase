@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/22
+@update_time:2024/12/27
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -100,6 +100,7 @@ class Yunbase():
                       use_CIR:bool=False,
                       use_median_as_pred:bool=False,
                       use_scaler:bool=False,
+                      use_TTA:bool=False,
                       use_eval_metric:bool=True,
                       feats_stat:list[tuple]=[],
                       use_spellchecker:bool=False,
@@ -166,6 +167,8 @@ class Yunbase():
         use_median_as_pred    :use median.(axis=0)) instead of mean.(axis=0)
         use_scaler            :use robust scaler to deal with outlier.
         use_eval_metric       : use 'eval_metric' when training lightgbm or xgboost.
+        use_TTA               :use 'test time augmentation'.It is to use 
+                               data augmentation operations in the inference process
         feats_stat            : (group_col,feature_col,aggregation_list)
                                example:feats_stat = [ ('id','up_time', ['min', 'max'])   ]
         use_spellchecker      :use SpellChecker to correct word in text.
@@ -277,12 +280,13 @@ class Yunbase():
         self.use_median_as_pred=use_median_as_pred
         self.use_scaler=use_scaler
         self.use_eval_metric=use_eval_metric
+        self.use_TTA=use_TTA
         self.use_spellchecker=use_spellchecker
 
         attritubes=['save_oof_preds','save_test_preds','exp_mode',
                     'use_reduce_memory','use_data_augmentation','use_scaler',
                     'use_oof_as_feature','use_CIR','use_median_as_pred','use_eval_metric',
-                    'use_spellchecker'
+                    'use_spellchecker','use_TTA'
                    ]
         for attr in attritubes:
             if getattr(self,attr) not in [True,False]:
@@ -329,6 +333,7 @@ class Yunbase():
                      'optuna_direction':self.optuna_direction,'early_stop':self.early_stop,
                      'use_pseudo_label':self.use_pseudo_label,'use_high_corr_feat':self.use_high_corr_feat,
                      'log':self.log,'exp_mode':self.exp_mode,'use_reduce_memory':self.use_reduce_memory,
+                     'use_TTA':self.use_TTA,
                      'AGGREGATIONS':self.AGGREGATIONS,'category_cols':self.category_cols,
               }
         return params_dict
@@ -354,6 +359,26 @@ class Yunbase():
         return x.quantile(0.25)
     def q3(self,x):
         return x.quantile(0.75)
+
+    #Time data cannot use this augmentation,as features such as year, month, and day are discrete variables.
+    def pca_augmentation(self,X:pd.DataFrame,y=None,target_col:str=''):
+        if type(y)!=pd.DataFrame:#y=None
+            origin_data=X.copy()
+        else:#
+            origin_data=pd.concat((X,y),axis=1)
+        n_components=np.clip( int(origin_data.shape[1]*0.8),1,X.shape[1])
+        pca=PCA(n_components=n_components)
+        pca_data=pca.fit_transform(origin_data)
+        aug_data=pca.inverse_transform(pca_data)
+        aug_data=pd.DataFrame(aug_data)
+        if type(y)!=pd.DataFrame:#y=None
+            aug_data.columns=list(X.columns)
+        else:
+            aug_data.columns=list(X.columns)+[target_col]
+        del origin_data,pca,pca_data
+        gc.collect()
+        
+        return aug_data
         
     #Traverse all columns of df, modify data types to reduce memory usage
     def reduce_mem_usage(self,df:pd.DataFrame, float16_as32:bool=True)->pd.DataFrame:
@@ -579,7 +604,7 @@ class Yunbase():
             #nunique=1
             self.unique_cols=[]
             for col in df.drop(self.drop_cols+self.list_cols+\
-                               [self.weight_col],axis=1,errors='ignore').columns:
+                               [self.weight_col,self.group_col,self.target_col],axis=1,errors='ignore').columns:
                 if(df[col].nunique()<2):#maybe np.nan
                     self.unique_cols.append(col)
                 #max_value_counts's count
@@ -711,8 +736,12 @@ class Yunbase():
                         agg2.append(agg)
                     else:
                         agg1.append(agg)
+                if type(group_col)==str:
+                    choose_cols=[group_col,feature_col]
+                else:#such as list
+                    choose_cols=group_col+[feature_col]
                 #deal with agg1
-                agg_df = df[[group_col,feature_col]].groupby(group_col).agg(agg1)
+                agg_df = df[choose_cols].groupby(group_col).agg(agg1)
                 agg_df.columns = ['_'.join(x) for x in agg_df.columns]
                 df=df.merge(agg_df,on=group_col,how='left')
                 #deal with agg2
@@ -1130,13 +1159,12 @@ class Yunbase():
             df[f'{date_col}_day']=df[date_col]%31+1
             df[f"sin_{date_col}_day"]=np.sin(2*np.pi*df[f'{date_col}_day']/31)
             df[f"cos_{date_col}_day"]=np.cos(2*np.pi*df[f'{date_col}_day']/31)
-        df[date_col]=df[date_col]//31
         #month
-        df[f'{date_col}_month']=df[date_col]%12+1
+        df[f'{date_col}_month']=df[date_col]//31%12+1
         df[f"sin_{date_col}_month"]=np.sin(2*np.pi*df[f'{date_col}_month']/12)
         df[f"cos_{date_col}_month"]=np.cos(2*np.pi*df[f'{date_col}_month']/12)
         #year
-        df[f'{date_col}_year']=df[date_col]//12+1970
+        df[f'{date_col}_year']=df[date_col]//365+1970
         return df
 
     #https://www.kaggle.com/code/marketneutral/purged-time-series-cv-xgboost-optuna
@@ -1212,6 +1240,28 @@ class Yunbase():
                 self.train[self.date_col]=self.train[self.date_col]*3600*24
                 self.test[self.date_col]=self.test[self.date_col]*3600*24
 
+        self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
+        self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
+
+        #Considering that some competitions may anonymize time,
+        #the real year, month, and day features were not extracted here.
+        if use_seasonal_features:
+            self.train=self.construct_seasonal_feature(self.train,self.date_col,timestep)
+            self.test=self.construct_seasonal_feature(self.test,self.date_col,timestep)
+        else:
+            if timestep=='minute':
+                self.train[self.date_col]=self.train[self.date_col]//60
+                self.test[self.date_col]=self.test[self.date_col]//60
+            if timestep=='hour':
+                self.train[self.date_col]=self.train[self.date_col]//3600
+                self.test[self.date_col]=self.test[self.date_col]//3600
+            if timestep=='day':
+                self.train[self.date_col]=self.train[self.date_col]//3600//24
+                self.test[self.date_col]=self.test[self.date_col]//3600//24
+        min_date_col=self.train[self.date_col].min()
+        self.train[self.date_col]-=min_date_col
+        self.test[self.date_col]-=min_date_col
+
         if test_date_range==0:#date_range same as test_data
             test_date_range=self.test[self.date_col].max()-self.test[self.date_col].min()+1
         if train_date_range==0:
@@ -1223,14 +1273,6 @@ class Yunbase():
         #final train set out of index?
         assert self.num_folds*train_gap_each_fold+train_date_range+train_test_gap <=self.train[self.date_col].max()+1
 
-        self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
-        self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
-
-        #Considering that some competitions may anonymize time,
-        #the real year, month, and day features were not extracted here.
-        if use_seasonal_features:
-            self.train=self.construct_seasonal_feature(self.train,self.date_col,timestep)
-            self.test=self.construct_seasonal_feature(self.test,self.date_col,timestep)
         
         train_columns=list(self.train.columns)
         
@@ -1244,11 +1286,11 @@ class Yunbase():
                 train_date_max=train_date_min+train_date_range
                 test_date_min=train_date_max+train_test_gap
                 test_date_max=test_date_min+test_date_range
-                print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
-                print(f"test_date_min:{test_date_min},test_date_max:{test_date_max}")
+                print(f"train_date_range:[{train_date_min},{train_date_max})")
+                print(f"test_date_range:[{test_date_min},{test_date_max})")
                 
-                train_fold=self.train.copy()[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
-                valid_fold=self.train.copy()[(self.train[self.date_col]>=test_date_min)&(self.train[self.date_col]<=test_date_max)]
+                train_fold=self.train.copy()[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<train_date_max)]
+                valid_fold=self.train.copy()[(self.train[self.date_col]>=test_date_min)&(self.train[self.date_col]<test_date_max)]
                 
                 X_train=train_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
                 y_train=train_fold[self.target_col]
@@ -1376,10 +1418,10 @@ class Yunbase():
                 gc.collect()
                 
         self.PrintColor("prediction on test data")
-        train_date_min=self.train[self.date_col].max()-train_test_gap-train_date_range
-        train_date_max=self.train[self.date_col].max()-train_test_gap
-        print(f"train_date_min:{train_date_min},train_date_max:{train_date_max}")
-        train=self.train[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<=train_date_max)]
+        train_date_min=self.train[self.date_col].max()-train_test_gap-train_date_range+1
+        train_date_max=self.train[self.date_col].max()-train_test_gap+1
+        print(f"train_date_range:[{train_date_min},{train_date_max})")
+        train=self.train[(self.train[self.date_col]>=train_date_min)&(self.train[self.date_col]<train_date_max)]
         train_weight=train[self.weight_col]
         X_train=train.drop([self.target_col,self.date_col,self.weight_col],axis=1)
         y_train=train[self.target_col]
@@ -1535,13 +1577,7 @@ class Yunbase():
                 gc.collect()
                 
             if use_data_augmentation:#X_train,y_train,sample_weight_train
-                origin_data=pd.concat((X_train,y_train),axis=1)
-                n_components=np.clip( int(origin_data.shape[1]*0.8),1,X_train.shape[1])
-                pca=PCA(n_components=n_components)
-                pca_data=pca.fit_transform(origin_data)
-                aug_data=pca.inverse_transform(pca_data)
-                aug_data=pd.DataFrame(aug_data)
-                aug_data.columns=list(X_train.columns)+[target_col]
+                aug_data=self.pca_augmentation(X_train,y_train,target_col)
                 
                 #concat origin_data aug_data
                 X_train=pd.concat((X_train,aug_data[X_train.columns]),axis=0)
@@ -2033,6 +2069,23 @@ class Yunbase():
                 test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
             else:   
                 test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size])  
+        
+        if self.use_TTA:
+            test_aug_X=self.pca_augmentation(X=test_X)
+            test_aug_preds=np.zeros((len(test_aug_X)))
+            if 'catboost' in str(type(model)):#catboost
+                test_aug_X[self.category_cols]=test_aug_X[self.category_cols].astype('string')
+            else:
+                test_aug_X[self.category_cols]=test_aug_X[self.category_cols].astype('category')
+            for idx in range(0,len(test_aug_X),self.infer_size):
+                if 'tabnet' in str(type(model)):
+                    for c in self.category_cols:
+                       test_aug_X[c]=test_aug_X[c].apply(lambda x:int(x)).astype(np.int32)     
+                    test_aug_preds[idx:idx+self.infer_size]=model.predict(test_aug_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
+                else:   
+                    test_aug_preds[idx:idx+self.infer_size]=model.predict(test_aug_X[idx:idx+self.infer_size])  
+            test_preds=(test_preds+test_aug_preds)/2
+        
         return test_preds
 
     def predict_proba_batch(self,model,test_X):
@@ -2048,6 +2101,23 @@ class Yunbase():
                 test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size].to_numpy())
             else:
                 test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size])
+        
+        if self.use_TTA:
+            test_aug_X=self.pca_augmentation(X=test_X)
+            test_aug_preds=np.zeros((len(test_aug_X),self.num_classes))
+            if 'catboost' in str(type(model)):#catboost
+                test_aug_X[self.category_cols]=test_aug_X[self.category_cols].astype('string')
+            else:
+                test_aug_X[self.category_cols]=test_aug_X[self.category_cols].astype('category')
+            for idx in range(0,len(test_aug_X),self.infer_size):
+                if 'tabnet' in str(type(model)):
+                    for c in self.category_cols:
+                       test_aug_X[c]=test_aug_X[c].apply(lambda x:int(x)).astype(np.int32)     
+                    test_aug_preds[idx:idx+self.infer_size]=model.predict_proba(test_aug_X[idx:idx+self.infer_size].to_numpy())
+                else:   
+                    test_aug_preds[idx:idx+self.infer_size]=model.predict_proba(test_aug_X[idx:idx+self.infer_size])  
+            test_preds=(test_preds+test_aug_preds)/2
+        
         return test_preds
     
     def predict(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=np.zeros(0))->np.array:
