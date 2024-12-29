@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/27
+@update_time:2024/12/29
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -316,6 +316,9 @@ class Yunbase():
         self.eps=1e-15#clip (eps,1-eps) | divide by zero.
         self.category_cols=[]
         self.high_corr_cols=[]
+        #to make sure column's dtype in train.csv is same as the column's dtype in test.csv.
+        #example:https://www.kaggle.com/competitions/home-credit-credit-risk-model-stability
+        self.col2dtype={} 
         self.weight_col=weight_col
 
     def get_params(self,):        
@@ -1132,12 +1135,16 @@ class Yunbase():
                self.train[self.weight_col]=1
             if len(self.train)<=self.one_hot_max:
                 raise ValueError(f"one_hot_max must less than {len(self.train)}")
+            for col in self.train.columns:
+                self.col2dtype[col]=self.train[col].dtype
         elif mode=='test':
             self.test=file.copy()
+            for col in self.test.columns:
+                self.test[col]=self.test[col].astype(self.col2dtype.get(col,object))
         else:#submission.csv
             return file
 
-    #https://www.kaggle.com/code/yunsuxiaozi/posv-yunbase-purgedcv
+    #https://www.kaggle.com/code/yunsuxiaozi/posv-yunbase-purgedcv-vs-cv
     def construct_seasonal_feature(self,df:pd.DataFrame,date_col:str='date',timestep:str='day'):
         #df[date_col] second
         if timestep=='second':
@@ -1585,7 +1592,7 @@ class Yunbase():
                 y_train=pd.concat((y_train,y_train),axis=0)
                 sample_weight_train=pd.concat((sample_weight_train,sample_weight_train),axis=0)
 
-                del origin_data,pca,pca_data,aug_data
+                del aug_data
                 gc.collect()
 
             if CV_sample!=None:
@@ -1739,9 +1746,10 @@ class Yunbase():
         for fold, (train_index, valid_index) in (enumerate(kf.split(X,y))):
             kf_folds['fold'][valid_index]=fold
 
-        temp_metric=self.metric
-        self.metric='auc'
-        self.cross_validation(X=X,y=y,group=None,kf_folds=kf_folds,
+        temp_metric,temp_objective=self.metric,self.objective
+        self.metric,self.objective='auc','binary'
+        
+        oof_preds,metric_score=self.cross_validation(X=X,y=y,group=None,kf_folds=kf_folds,
                          model=LGBMClassifier(n_estimators=256,metric='auc'),
                          model_name='lgb_adversarial_validation',
                          sample_weight=sample_weight,
@@ -1751,8 +1759,11 @@ class Yunbase():
                          test=None,group_col=None,target_col='is_test',
                          category_cols=[],device=self.device,
                          early_stop=100,plot_feature_importance=True,
-                         metric='auc',Metric=self.Metric)
-        self.metric=temp_metric
+                         metric='auc',Metric=self.Metric
+                        )
+        self.PrintColor(f"{self.metric}------------------------------>{metric_score}",color = Fore.RED)
+
+        self.metric,self.objective=temp_metric,temp_objective
         self.trained_models=[]
     
     def drop_high_correlation_feats(self,df:pd.DataFrame)->None:
@@ -1875,6 +1886,7 @@ class Yunbase():
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.1,
                         "n_estimators": 20000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
                         "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
+                        'importance_type': 'gain',#better than 'split'
                         }
             #find new params then use optuna
             if self.use_optuna_find_params:
