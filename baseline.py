@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2024/12/29
+@update_time:2024/12/31
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -200,8 +200,11 @@ class Yunbase():
         self.n_repeats=n_repeats
         self.seed=seed
         self.models=models
-        self.group_col=group_col
         self.target_col=target_col
+        if type(group_col)==str:
+            self.group_col=self.colname_clean([group_col])[0]
+        else:
+            self.group_col=group_col
         self.FE=FE
         self.CV_sample=CV_sample
         self.drop_cols=self.colname_clean(drop_cols)
@@ -994,9 +997,11 @@ class Yunbase():
             elif self.metric=='mse':
                 return np.mean((y_true-y_pred)**2)
             elif self.metric=='rmsle':
-                return np.sqrt(np.mean((np.log1p(y_pred)-np.log1p(y_true))**2))
+                y_pred=np.clip(y_pred,0,1e20)
+                return np.sqrt(np.mean((np.log1p(y_true)-np.log1p(y_pred))**2))
             elif self.metric=='msle':
-                return np.mean((np.log1p(y_pred)-np.log1p(y_true))**2)
+                y_pred=np.clip(y_pred,0,1e20)
+                return np.mean((np.log1p(y_true)-np.log1p(y_pred))**2)
             elif self.metric=='mape':
                 return np.mean(np.abs(y_pred-y_true)/y_true)
             elif self.metric=='r2':
@@ -1102,6 +1107,7 @@ class Yunbase():
             if cols[i]!=self.target_col:
                 for char in json_char:
                     cols[i]=cols[i].replace(char,'json')
+            cols[i]=cols[i].replace(' ','_')
         return cols
 
     def load_data(self,path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',mode:str='train')->None|pd.DataFrame:
@@ -1124,8 +1130,8 @@ class Yunbase():
                 file=file.to_pandas()
             if not isinstance(file, pd.DataFrame):
                 raise ValueError(f"{mode}_path_or_file is not pd.DataFrame.")
-        
-        file.columns=self.colname_clean(list(file.columns))
+        if mode in ['train','test']:#mode='submission'
+            file.columns=self.colname_clean(list(file.columns))
         
         if mode=='train':
             self.train=file.copy()
@@ -1214,7 +1220,7 @@ class Yunbase():
         self.load_data(path_or_file=test_path_or_file,mode='test')
         if len(self.test.dropna())==0:
             raise ValueError("At least one row of test data must have no missing values.")
-        self.date_col=date_col
+        self.date_col=self.colname_clean([date_col])[0]
         
         self.category_cols=self.colname_clean(category_cols)
         self.target_dtype=self.train[self.target_col].dtype
@@ -1314,6 +1320,7 @@ class Yunbase():
                     if self.exp_mode:#use log transform for target_col
                         self.exp_mode_b=-y_train.min()
                         y_train=np.log1p(y_train+self.exp_mode_b)
+                        y_valid=np.log1p(y_valid+self.exp_mode_b)
 
                     if self.CV_sample!=None:
                         X_train,y_train,train_weight=self.CV_sample(X_train,y_train,train_weight)
@@ -1406,7 +1413,9 @@ class Yunbase():
                     else:
                         valid_pred=self.predict_proba_batch(model=model,test_X=X_valid)
                     if self.exp_mode:
+                        y_train=np.expm1(y_train)-self.exp_mode_b
                         valid_pred=np.expm1(valid_pred)-self.exp_mode_b
+                        y_valid=np.expm1(y_valid)-self.exp_mode_b
                     if self.save_oof_preds:#if oof_preds is needed
                         np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}_target.npy",y_valid.values)
                         np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}_valid_pred.npy",valid_pred)
