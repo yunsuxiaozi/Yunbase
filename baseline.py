@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/01/03
+@update_time:2025/01/05
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -56,7 +56,7 @@ import random#provide some function to generate random_seed.
 def seed_everything(seed):
     np.random.seed(seed)#numpy's random seed
     random.seed(seed)#python built-in random seed
-seed_everything(seed=2024)
+seed_everything(seed=2025)
 
 class Yunbase():
     def __init__(self,num_folds:int=5,
@@ -68,7 +68,7 @@ class Yunbase():
                       target_col:str='target',
                       weight_col:str='weight',
                       drop_cols:list[str]=[],
-                      seed:int=2024,
+                      seed:int=2025,
                       objective:str='regression',
                       metric:str='mse',
                       nan_margin:float=0.95,
@@ -837,7 +837,7 @@ class Yunbase():
                     df[self.cross_cols[i]+"_divide_"+self.cross_cols[j]]=df[self.cross_cols[i]]/(df[self.cross_cols[j]]+self.eps)
         
         print("< drop useless cols >")
-        total_drop_cols=self.nan_cols+self.unique_cols+self.object_cols+drop_cols+self.high_corr_cols
+        total_drop_cols=self.nan_cols+self.unique_cols+drop_cols+self.high_corr_cols
         total_drop_cols=[col for col in total_drop_cols if col not in \
                          self.word2vec_cols+self.labelencoder_cols+self.category_cols]
         df.drop(total_drop_cols,axis=1,inplace=True,errors='ignore')
@@ -893,6 +893,9 @@ class Yunbase():
                 #repeat i fold j's category_transformer  cat_col2value 
                 category_transformer={}
                 for (g_col,t_col,agg) in self.target_stat:
+                    g_col=self.colname_clean([g_col])[0]
+                    if t_col!=self.target_col:
+                        t_col=self.colname_clean([t_col])[0]
                     agg_df = df[[g_col,t_col]].groupby(g_col).agg(agg)
                     agg_df.columns = ['_'.join(x) for x in agg_df.columns]
                     agg_df.columns = [ f'{g_col}_transform_{x}' for x in agg_df.columns if x!=g_col]
@@ -911,11 +914,12 @@ class Yunbase():
         #labelencoder
         if len(self.labelencoder_cols):
             print("< label encoder >")
-            df=self.label_encoder(df,label_encoder_cols=self.labelencoder_cols,fold=fold,repeat=repeat)
+            df=self.label_encoder(df,label_encoder_cols=self.colname_clean(self.labelencoder_cols),fold=fold,repeat=repeat)
 
         if len(self.word2vec_models):
             print("< word2vec >")
             for (word2vec,col,model_name) in self.word2vec_models:
+                col=self.colname_clean([col])[0]
                 self.PrintColor(f"-> for column {col} {model_name} word2vec feature",color=Fore.RED)
                 #tfidf,countvec
                 if 'word2vec' not in model_name:
@@ -965,7 +969,8 @@ class Yunbase():
                     word2vec_feats=svd.transform(word2vec_feats)
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
-        df.drop(self.word2vec_cols+self.labelencoder_cols,axis=1,inplace=True)
+        #drop object_cols here because CV_stat may use category_string_cols.
+        df.drop(self.colname_clean(self.word2vec_cols+self.labelencoder_cols+self.object_cols),axis=1,inplace=True,errors='ignore')
         #after this operation,df will be dropped into model,so we need to Convert object to floating-point numbers
         for col in df.columns:
             if (df[col].dtype==object):
@@ -1221,6 +1226,7 @@ class Yunbase():
                                 use_weighted_metric:bool=False,
                                 only_inference:bool=False,
                                 timestep:str='day',
+                                target2idx:dict|None=None
                                ):
         """
         train_path_or_file/test_path_or_file:your train and test dataset.
@@ -1316,6 +1322,10 @@ class Yunbase():
         #final train set out of index?
         assert self.num_folds*train_gap_each_fold+train_date_range+train_test_gap <=self.train[self.date_col].max()+1
 
+        if self.objective!='regression':
+            y=self.train[self.target_col]
+            self.train[self.target_col]=self.set_target2idx(y,target2idx)
+        
         self.train.columns=self.colname_clean(list(self.train.columns))
         self.test.columns=self.colname_clean(list(self.test.columns))
         
@@ -1795,7 +1805,7 @@ class Yunbase():
         X=total.drop(['is_test'],axis=1)
         y=total['is_test']
         sample_weight=pd.DataFrame({"weight":np.ones(len(y))})['weight']
-        kf=StratifiedKFold(n_splits=5,random_state=2024,shuffle=True)     
+        kf=StratifiedKFold(n_splits=5,random_state=self.seed,shuffle=True)     
         kf_folds=pd.DataFrame({"fold":np.zeros(len(y))})
         for fold, (train_index, valid_index) in (enumerate(kf.split(X,y))):
             kf_folds['fold'][valid_index]=fold
@@ -1843,6 +1853,28 @@ class Yunbase():
         del numerical_cols
         gc.collect()
         return drop_cols
+
+    #binary or multi_class
+    def set_target2idx(self,y:pd.DataFrame,target2idx:dict|None=None):
+        #use your custom target2idx  when objective=='binary' or 'multi_class'
+        self.use_custom_target2idx=(type(target2idx)==dict)
+        if self.use_custom_target2idx:#use your custom target2idx
+            self.target2idx=target2idx
+        else:
+            self.target2idx={}
+            y_unique=list(y.value_counts().to_dict().keys())
+            for idx in range(len(y_unique)):
+                self.target2idx[y_unique[idx]]=idx
+        #deal with {0:1,1:0}
+        if self.target2idx=={0:1,1:0}:
+            self.target2idx={0:0,1:1}
+
+        self.idx2target={}
+        for tgt,idx in self.target2idx.items():
+                self.idx2target[idx]=tgt
+            
+        y=y.apply(lambda k:self.target2idx[k])
+        return y
     
     def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
             category_cols:list[str]=[],date_cols:list[str]=[],
@@ -1850,8 +1882,6 @@ class Yunbase():
            ):
         if self.num_folds<2:#kfold must greater than 1
             raise ValueError("num_folds must be greater than 1.")
-        #use your custom target2idx  when objective=='binary' or 'multi_class'
-        self.use_custom_target2idx=(type(target2idx)==dict)
         #lightgbm:https://github.com/microsoft/LightGBM/blob/master/python-package/lightgbm/sklearn.py
         #xgboost:https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/sklearn.py
         #category_cols:Convert string columns to 'category'.
@@ -1887,22 +1917,7 @@ class Yunbase():
                 
         #classification:target2idx,idx2target
         if self.objective!='regression':
-            if self.use_custom_target2idx:#use your custom target2idx
-                self.target2idx=target2idx
-            else:
-                self.target2idx={}
-                y_unique=list(y.value_counts().to_dict().keys())
-                for idx in range(len(y_unique)):
-                    self.target2idx[y_unique[idx]]=idx
-            #deal with {0:1,1:0}
-            if self.target2idx=={0:1,1:0}:
-                self.target2idx={0:0,1:1}
-
-            self.idx2target={}
-            for tgt,idx in self.target2idx.items():
-                    self.idx2target[idx]=tgt
-                
-            y=y.apply(lambda k:self.target2idx[k])
+            y=self.set_target2idx(y,target2idx)
 
         #save true label in train data to calculate final score  
         self.target=y.values
