@@ -2,7 +2,7 @@
 
 <img src="yunbase.png" alt="yunbase title image" style="zoom:100%;" />
 
-In the competition of data mining,there are many operations that need to be done in every time.Many of these operations,from data preprocessing to k-fold cross validation,are repetitive.It's a bit troublesome to write repetitive code every time,so I extracted the common parts among these operations and wrote the Yunbase class here.('Yun' is my name <b>yunsuxiaozi</b>,'base' is the baseline of competition)
+In the competition of data mining,there are many operations that need to be done in every time.Many of these operations,from data preprocessing to k-fold cross validation,are repetitive.It's a bit troublesome to write repetitive code every time,so I extracted the common parts among these operations and wrote the Yunbase class here.('Yun' is my name <b>yunsuxiaozi</b>,'base' is the baseline of competition.)
 
 
 
@@ -65,10 +65,8 @@ yunbase=Yunbase(  num_folds:int=5,
                   use_high_corr_feat:bool=True,
                   cross_cols:list[str]=[],
                   labelencoder_cols:list[str]=[],
-                  list_cols:list[str]=[],
-                  list_gaps:list[int]=[1],
+                  list_stat:list[tuple]=[],
                   word2vec_models:list[tuple]=[],
-                  use_svd:bool=False,
                   text_cols:list[str]=[],
                   plot_feature_importance:bool=False,
                   log:int=100,
@@ -79,8 +77,10 @@ yunbase=Yunbase(  num_folds:int=5,
                   use_CIR:bool=False,
                   use_median_as_pred:bool=False,
                   use_scaler:bool=False,
+                  use_TTA:bool=False,
                   use_eval_metric:bool=True,
                   feats_stat:list[tuple]=[],
+                  target_stat:list[tuple]=[],
                   use_spellchecker:bool=False,
                   AGGREGATIONS:list=['nunique','count','min','max','first',
                                      'last','mean','median','sum','std','skew',kurtosis],
@@ -89,9 +89,9 @@ yunbase=Yunbase(  num_folds:int=5,
 
 - num_folds:<b>int</b>.the number of folds for k-fold cross validation.
 
-- n_repeats:<b>int</b>,Replace different seeds for multiple kfold cross validation.
+- n_repeats:<b>int</b>,Replace different seeds for multiple kfold cross validation.<span style="color: red;">This parameter is generally used for small datasets to ensure the stability of the model.</span>
 
-- models:<b>list of models</b>.Built in 3 GBDTs as baseline, you can also use custom models,such as 
+- models:<b>list[tuple]</b>.Built in 3 GBDTs as baseline, you can also use custom models,such as 
   
   ```python
   models=[(LGBMRegressor(**lgb_params),'lgb')]
@@ -109,31 +109,36 @@ yunbase=Yunbase(  num_folds:int=5,
 
 
 
-- CV_sample:<b>function</b>.You can customize your downsampling and oversampling operations inside.In order to ensure the accuracy of CV, operations on the validation set should not be performed in principle. However, in order to make it more universal, operations on the validation set are still allowed here In addition to sampling operations, related feature engineering can also be customized here.
+- CV_sample:<b>function</b>.You can customize your downsampling and oversampling operations inside.In order to ensure the accuracy of CV, operations on the validation set should not be performed in principle. However, to meet personalized needs, operations on the validation set are still allowed here In addition to sampling operations, related feature engineering can also be customized here.
 
   For example:
 
   ```python
   def CV_sample(X_train,y_train,X_valid,y_valid,
                 sample_weight_train,sample_weight_valid):
-      negative_idx=list(np.where(y_train==0)[0])
-      positive_idx=list(np.where(y_train==1)[0])
-      np.random.shuffle(positive_idx)
-      positive_idx=positive_idx[:int(len(positive_idx)*0.9)]
-      X_train_copy=X_train.iloc[negative_idx].copy()
-      y_train_copy=y_train.iloc[negative_idx].copy()
-      y_train_copy[:]=1
-      X_train=pd.concat((X_train.iloc[positive_idx+negative_idx],X_train_copy)).reset_index(drop=True)
-      y_train=pd.concat((y_train.iloc[positive_idx+negative_idx],y_train_copy)).reset_index(drop=True)
-      sample_weight_train=pd.concat((sample_weight_train.iloc[positive_idx+negative_idx],sample_weight_train.iloc[negative_idx])).reset_index(drop=True)
+      less_idx=list(np.where(y_train==1)[0])
+      more_idx=list(np.where(y_train==0)[0])
+      np.random.shuffle(more_idx)
+      #undersample
+      more_idx=more_idx[:int(len(more_idx)*0.9)]
+      #Adversarial learning
+      X_train_copy=X_train.iloc[less_idx].copy()
+      y_train_copy=y_train.iloc[less_idx].copy()
+      y_train_copy[:]=0
+      sample_weight_train_copy=sample_weight_train.iloc[less_idx].copy()
+      
+      X_train=pd.concat((X_train.iloc[more_idx+less_idx],X_train_copy)).reset_index(drop=True)
+      y_train=pd.concat((y_train.iloc[more_idx+less_idx],y_train_copy)).reset_index(drop=True)
+      sample_weight_train=pd.concat((sample_weight_train.iloc[more_idx+less_idx],sample_weight_train_copy)).reset_index(drop=True)
       return X_train,y_train,X_valid,y_valid,sample_weight_train,sample_weight_valid
   ```
 
 
-​      In purgedCV, in order to make the training set and test set closer, without a validation set, this function will become as follows:
+​      In purgedCV(time series CV), in order to make the training set and test set closer, without a validation set, this function will become as follows:
 
 ```
 def CV_sample(X_train,y_train,sample_weight_train):
+    #your code
     return X_train,y_train,sample_weight_train
 ```
 
@@ -156,29 +161,37 @@ def CV_sample(X_train,y_train,sample_weight_train):
 
 - nan_margin:<b>float</b>.when the proportion of missing values in a column is greater than, we delete this column.
 
-- num_classes:<b>int</b>.if objectibe is multi_class or binary,you should define this class.
+- num_classes:<b>int</b>.if objectibe is <b>multi_class</b> or <b>binary</b>,you should define this parameter.
 
-- infer_size:<b>int</b>.the test data might be large,we can predict in batches.
+- infer_size:<b>int</b>.the test data might be large,we can predict in batches to deal with memory issues.
 
 - save_oof_preds:<b>bool</b>.you can save OOF for your own offline study.
 
-- save_test_preds:<b>bool</b>.you can save test_preds.For multi classification tasks, the predicted result is the category.If you need to save the probability of the test_data,you can use save_test_preds.                         
+- save_test_preds:<b>bool</b>.you can save test_preds for your own offline study.                       
 
-- device:<b>str</b>.GBDT can training on GPU,you can set this parameter like NN.
+- device:<b>str</b>.GBDT can training on GPU,you can set this parameter 'gpu' when you want to training on GPU.
 
 - one_hot_max:<b>int</b>.If the nunique of a column is less than a certain value, perform one hot encoder.
 
-- custom_metric:<b>function</b>.your custom_metric.
+- custom_metric:<b>function</b>.you can define your  own custom_metric.
 
-     <b>Attention:when objective is multi_class,y_pred in custom_metric(y_true,y_pred) is probability.</b>
+     ```python
+     def weighted_MAE(y_true,y_pred,
+                      weight=train['weight'].values):
+         return np.sum(weight*np.abs(y_true-y_pred))/np.sum(weight)
+     ```
 
-- use_optuna_find_params:<b>int</b>.count of use optuna find best params,0 is not use optuna to find params.Currently only LGBM is supported.
+     <span style="color: red;">1.custom_metric can only pass in the parameters y_true and y_pred. If it is a regular cross validation, it needs to be assigned a value in advance like the weight parameter above. If it is a time series CV, the use_weighted_metric parameter can be used without defining the weight parameter.</span>
 
-- optuna_direction:<b>str</b>.'minimize' or 'maximize',when you use custom metric,you need to define.the direction of optimization.
+     <span style="color: red;">2.when objective is multi_class,y_pred in custom_metric(y_true,y_pred) is probability(shape:(len(y_true),num_classes)).</span>
+
+- use_optuna_find_params:<b>int</b>.count of use optuna find best params,0 is not use optuna to find params.<span style="color: red;">Currently only LGBM is supported.</span>
+
+- optuna_direction:<b>str</b>.'minimize' or 'maximize',when you use custom metric,you must define the direction of optimization.
 
 - early_stop:<b>int</b>.Common parameters of GBDT.
 
-- use_pseudo_label:<b>bool</b>.Whether to use pseudo labels.When it is true,adding the test data to the training data and training again after obtaining the predicted results of the test data.
+- use_pseudo_label:<b>bool</b>.Whether to use pseudo labels.When it is true,adding the test data to the training data and training again after obtaining the predicted results of the test data.<span style="color: red;">To obtain a reliable CV, the test set and cross validation training set are concatenated and validated using the validation set.</span>
 
 - use_high_corr_feat:<b>bool</b>.whether to use high correlation features or not. 
 
@@ -186,25 +199,29 @@ def CV_sample(X_train,y_train,sample_weight_train):
 
 - labelencoder_cols:<b>list</b>.Convert categorical string variables into [1,2,……,n].
 
-- list_cols:<b>list</b>.If the data in a column is a list or str(list), this can be used to extract features.
+- list_stat:<b>list[tuple]=[]</b>.example:[('step_list',list_gap=[1,2,4])].<span style="color: red;">step_list:If the data in a column is a list or str(list),
+                                    such as [] or '[]', this can be used to extract diff and 
+                                    shift features for list_cols.  </span>   
 
-- list_gaps:<b>list</b>.extract features for list_cols.example=[1,2,4].
-
-- word2vec_models:<b>list</b>.Use models such as tfidf to extract features of string columns.For example:word2vec_models=[(TfidfVectorizer(),col,model_name)].
+- word2vec_models:<b>list[tuple]</b>.Use models such as tfidf to extract features of string columns.For example:
   
-- use_svd:<b>bool</b>.use truncated  singular value decomposition to word2vec features.
+  ```
+  word2vec_models=[(TfidfVectorizer(),col,model_name='tfidf',use_svd=False)]
+  ```
   
-- text_cols:<b>list</b>.extract features of words, sentences, and paragraphs from text here.
+  
+  
+- text_cols:<b>list[str]</b>.extract features of words, sentences, and paragraphs from text here.
 
 - plot_feature_importance:<b>bool</b>.after model training,whether print feature importance or not.
 
-- log:<b>int</b>.log trees are trained in the GBDT model to output a validation set score once.
+- log:<b>int</b>.How many iterators output scores on the validation set once.
 
 - exp_mode:<b>bool</b>.In regression tasks, the distribution of target_col is a long tail distribution, and this parameter can be used to perform log transform on the target_col.
 
-- use_reduce_memory:<b>bool</b>.if use function reduce_mem_usage(),then set this parameter True.
+- use_reduce_memory:<b>bool</b>.<span style="color: red;">When facing large datasets, this method can be used to reduce memory.</span>   
 
-- use_data_augmentation:<b>bool</b>.if use data augmentation,During cross validation, the training data will undergo PCA transformation followed by inverse transformation.
+- use_data_augmentation:<b>bool</b>.if use data augmentation,During cross validation, the training data will undergo PCA transformation followed by inverse transformation.<span style="color: red;">You can see function pca_augmentation for more details.</span>   
 
 - use_oof_as_feature:<b>bool</b>.For training data, use the oof_preds of the previous model as the feature, and for testing data, use the predicted results of the previous model as the feature for next model.
 
@@ -212,11 +229,13 @@ def CV_sample(X_train,y_train,sample_weight_train):
 
 - use_median_as_pred:<b>bool</b>.The general model ensemble uses the mean as the prediction result, and this parameter uses median as the prediction result, which sometimes achieves better results, but only slightly.
 
-- use_scaler:<b>bool</b>.use robust scaler to deal with outlier.
+- use_scaler:<b>bool</b>.Although the usual scaling operation is not useful for GBDT models, after scaling the data, the clip operation can be used to remove outliers.We are using RobustScaler here.
 
-- use_eval_metric:<b>bool</b>.Use custom evaluation metric to evaluate models during training with lightgbm and xgboost.
+- use_TTA:<b>bool</b>.It is to apply the previous data augmentation operation to the test set and then take the average of the predicted results.
 
-- feats_stat:Construct groupby features.for example: training data has some patients, testing data has other patients, each patient has multiple samples, this function can be used.
+- use_eval_metric:<b>bool</b>.Use metric to evaluate models during training with lightgbm and xgboost.
+
+- feats_stat:<b>list[tuple]=[]</b>.Construct groupby features.for example: training data has some patients, testing data has other patients, each patient has multiple samples, this function can be used.
 
      
 
@@ -225,7 +244,11 @@ def CV_sample(X_train,y_train,sample_weight_train):
      [('patient_id','year',['max','min','median','mean','std','skew',kurtosis,'(x-mean)/std','max-min','mean/std'])]
      ```
 
+- target_stat:<b>list[tuple]=[]</b>.It also performs a groupby operation to target encode categorical variables, such as calculating the mean of the target for each category in the training set.
+
 - use_spellchecker:<b>bool</b>.This is an immature feature that checks for word errors in text and then makes corrections. The main issue is that it takes too long time.
+
+- AGGREGATIONS=['nunique','count','min','max','first', 'last', 'mean','median','sum','std','skew',kurtosis]
 
 
 
@@ -299,7 +322,7 @@ yunbase.model_save_path=your_model_save_path
 11.train data and test data can be seen as below.
 
 ```python
-yunbase.train,yunbase.test
+yunbase.train.head(),yunbase.test.head()
 ```
 
 ##### <a href="https://www.kaggle.com/code/yunsuxiaozi/yunbase">Here</a> is a static version that can be used to play Kaggle competition.You can refer to this <a href="https://www.kaggle.com/code/yunsuxiaozi/brist1d-top5-solution">notebook</a> to learn usage of Yunbase. 
@@ -307,7 +330,7 @@ yunbase.train,yunbase.test
 ## TimeSeries Purged CV
 
 ```python
-yunbase.purged_cross_validation(train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
+yunbase.purged_cross_validation(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
                                 test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',
                                 date_col:str='date',train_gap_each_fold:int=31,#one month
                                 train_test_gap:int=7,#a week
@@ -317,7 +340,8 @@ yunbase.purged_cross_validation(train_path_or_file:str|pd.DataFrame|pl.DataFrame
                                 use_weighted_metric:bool=False,
                                 only_inference:bool=False,
                                 timestep:str='day',
-                           ) 
+                                target2idx:dict|None=None
+                               )
 ```
 
 - only_inference:If you don't want to see the offline scores of the time-series CV or want to save time, you can directly train the final submitted model.
@@ -358,5 +382,5 @@ Kaggle:https://www.kaggle.com/yunsuxiaozi
 
 
 
- update time:2024/12/22(baseline.py and README may not synchronize updates)
+ update time:2025/01/06(baseline.py and README may not synchronize updates)
 
