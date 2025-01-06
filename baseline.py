@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/01/05
+@update_time:2025/01/06
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -86,10 +86,8 @@ class Yunbase():
                       use_high_corr_feat:bool=True,
                       cross_cols:list[str]=[],
                       labelencoder_cols:list[str]=[],
-                      list_cols:list[str]=[],
-                      list_gaps:list[int]=[1],
+                      list_stat:list[tuple]=[],
                       word2vec_models:list[tuple]=[],
-                      use_svd:bool=False,
                       text_cols:list[str]=[],
                       plot_feature_importance:bool=False,
                       log:int=100,
@@ -123,7 +121,8 @@ class Yunbase():
                                ultimately return any X_train or y_train,sample_weight.
         group_col             :if you want to use groupkfold,then define this group_col.
         target_col            :the column that you want to predict.
-        weight_col            :
+        weight_col            :When training the model, give each sample a different weight. 
+                               If you don't set it, the weight of each sample will default to 1.
         drop_cols             :The column to be deleted after all feature engineering is completed.
         seed                  :random seed.
         objective             :what task do you want to do?regression,binary or multi_class?
@@ -149,11 +148,14 @@ class Yunbase():
         use_high_corr_feat    :whether to use high correlation features or not. 
         cross_cols            :Construct features for adding, subtracting, multiplying, and dividing these columns.
         labelencoder_cols     :Convert categorical string variables into [1,2,……,n].
-        list_cols             :If the data in a column is a list or str(list), this can be used to extract features.
-        list_gaps             :extract features for list_cols.example=[1,2,4]
-        word2vec_models       :Use models such as tfidf to extract features of string columns 
-                               example:word2vec_models=[(TfidfVectorizer(max_features=250,ngram_range=(2,3)),col,model_name)]
-        use_svd               :use Truncated  Singular value decomposition to word2vec features.
+        list_stat             :example:[(list_col:str='step_list',list_gap:list[int]=[1,2,4])].
+                               list_col:If the data in a column is a list or str(list),
+                               such as [] or '[]', this can be used to extract diff and 
+                               shift features for list_cols.
+        word2vec_models       :Use models such as tfidf to extract features of string columns.
+                               example:word2vec_models=[(TfidfVectorizer(max_features=250,
+                                        ngram_range=(2,3)),col,model_name,use_svd)],
+                               use_svd:use Truncated Singular value decomposition to word2vec features.
         text_cols             :extract features of words, sentences, and paragraphs from text here.
         plot_feature_importance:after model training,whether print feature importance or not
         log                   :log trees are trained in the GBDT model to output a validation set score once.
@@ -264,13 +266,21 @@ class Yunbase():
         self.use_high_corr_feat=use_high_corr_feat
         self.cross_cols=cross_cols
         self.labelencoder_cols=labelencoder_cols
-        self.list_cols=list_cols
-        self.list_gaps=sorted(list_gaps)
+        self.list_stat=list_stat
+        self.list_cols=[l[0] for l in self.list_stat]
         
         self.word2vec_models=word2vec_models
-        self.use_svd=use_svd
-        self.word2vec_cols=[]#origin cols that need to use in tfidf model.
+        for i in range(len(self.word2vec_models)):
+            #default use_svd=False
+            if len(self.word2vec_models[i])==3:#(model,col,model_name)
+                tup=self.word2vec_models[i]
+                self.word2vec_models[i]=(tup[0],tup[1],tup[2],False)
+            
+        self.word2vec_cols=[col for (model,col,model_name,use_svd) in self.word2vec_models]#origin cols that need to use in tfidf model. 
         self.text_cols=text_cols#extract features of words, sentences, and paragraphs from text here.
+        #to perform only one clean_text operation
+        self.param_text=list(set(self.word2vec_cols+self.text_cols))
+        
         self.plot_feature_importance=plot_feature_importance
         #Due to the presence of special characters in some column names, 
         #they cannot be directly passed into the LGB model training, so conversion is required
@@ -338,8 +348,8 @@ class Yunbase():
                      'drop_cols':self.drop_cols,'group_col':self.group_col,'num_classes':self.num_classes,
                      'target_col':self.target_col,'infer_size':self.infer_size,'device':self.device,
                      'cross_cols':self.cross_cols,'labelencoder_cols':self.labelencoder_cols,
-                     'list_cols':self.list_cols,'list_gaps':self.list_gaps,
-                     'word2vec_models':self.word2vec_models,'use_svd':self.use_svd,
+                     #2025/01/06 need to be updated.
+                     
                      'text_cols':self.text_cols,'plot_feature_importance':self.plot_feature_importance,
                      'save_oof_preds':self.save_oof_preds,'save_test_preds':self.save_test_preds,
                      'one_hot_max':self.one_hot_max,'use_optuna_find_params':self.use_optuna_find_params,
@@ -510,9 +520,6 @@ class Yunbase():
     ############text Feature Engineer
     def text_FE(self,df:pd.DataFrame,text_col:str='text'):
         df['index']=np.arange(len(df))
-        #data processing
-        self.PrintColor(f"-> for column {text_col} text clean",color=Fore.YELLOW)
-        df[text_col]=(df[text_col].fillna('nan')).apply(lambda x:self.clean_text(x))
         #correct text
         if self.use_spellchecker:
             self.PrintColor(f"-> for column {text_col} text correct",color=Fore.YELLOW)
@@ -601,6 +608,20 @@ class Yunbase():
         if self.FE!=None:
             #use your custom metric first
             df=self.FE(df)
+
+        #clean text
+        for pt_col in tqdm(self.param_text):
+            self.PrintColor(f"-> for column {pt_col} text clean",color=Fore.YELLOW)
+            df[pt_col]=(df[pt_col].fillna('nan'))
+            if df[pt_col].nunique()>0.5*len(df):
+                df[pt_col]=df[pt_col].apply(lambda x:self.clean_text(x))
+            else:#use dict to clean,save time.
+                text2clean={}
+                for text in df[pt_col].unique():
+                    text2clean[text]=self.clean_text(text)
+                df[pt_col]=df[pt_col].apply(lambda x:text2clean.get(x,'nan'))
+                del text2clean
+                gc.collect()
         
         #text feature extract,such as word,sentence,paragraph.
         #The reason why it needs to be done earlier is that it will generate columns such as nunique=1 or
@@ -684,32 +705,32 @@ class Yunbase():
             df=self.label_encoder(df,label_encoder_cols=[col],fold=self.num_folds)
             df[col]=df[col].astype('category')
         
-        if len(self.list_cols):
+        if len(self.list_stat):
             print("< list column's feature >")
-            for col in self.list_cols:
+            for (l_col,l_gaps) in self.list_stat:
                 try:#if str(list),transform '[a,b]' to [a,b]
-                    df[col]=df[col].apply(lambda x:ast.literal_eval(x))
+                    df[l_col]=df[l_col].apply(lambda x:ast.literal_eval(x))
                 except:#origin data is list or data can't be parsed.
                     #<class 'numpy.ndarray'> [10103]
-                    if not isinstance(list(df[col].dropna().values[0]),list):
-                        raise ValueError(f"col '{col}' is not a list.")
+                    if not isinstance(list(df[l_col].dropna().values[0]),list):
+                        raise ValueError(f"col '{l_col}' is not a list.")
                 
                 #add index,data of list can groupby index.
                 df['index']=np.arange(len(df))
                 #construct origin feats 
-                list_col_df=df.copy().explode(col)[['index',col]]
-                list_col_df[col]=list_col_df[col].astype(np.float32)
+                list_col_df=df.copy().explode(l_col)[['index',l_col]]
+                list_col_df[l_col]=list_col_df[l_col].astype(np.float32)
 
-                group_cols=[col]
-                for gap in self.list_gaps:
-                    self.PrintColor(f"-> for column {col} gap{gap}",color=Fore.RED)
-                    list_col_df[f"{col}_gap{gap}"]=list_col_df.groupby(['index'])[col].diff(gap)
-                    group_cols.append( f"{col}_gap{gap}" )
+                group_cols=[l_col]
+                for gap in l_gaps:
+                    self.PrintColor(f"-> for column {l_col} gap{gap}",color=Fore.RED)
+                    list_col_df[f"{l_col}_gap{gap}"]=list_col_df.groupby(['index'])[l_col].diff(gap)
+                    group_cols.append( f"{l_col}_gap{gap}" )
 
                 list_col_agg_df = list_col_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
                 list_col_agg_df.columns = ['_'.join(x) for x in list_col_agg_df.columns]
                 df=df.merge(list_col_agg_df,on='index',how='left')
-                df[f'{col}_len']=df[col].apply(len)
+                df[f'{l_col}_len']=df[l_col].apply(len)
                 
                 for gcol in group_cols:
                     if (f'{gcol}_max' in df.columns) and (f'{gcol}_min' in df.columns):
@@ -717,7 +738,7 @@ class Yunbase():
                     if (f'{gcol}_mean' in df.columns) and (f'{gcol}_std' in df.columns):
                         df[f'{gcol}_mean_divide_{gcol}_std']=df[f'{gcol}_mean']/(df[f'{gcol}_std']+self.eps)
 
-                col_list=df[col].values
+                col_list=df[l_col].values
                 max_k=10
                 res=[]
                 for i in range(len(df)):
@@ -729,7 +750,7 @@ class Yunbase():
                     res.append(res_)
                 res=np.array(res)
                 for k in range(max_k):
-                    df[f"{col}_valuecount_equal{k+1}_cnt"]=res[:,k]
+                    df[f"{l_col}_valuecount_equal{k+1}_cnt"]=res[:,k]
                 
                 #drop index after using.
                 df.drop(['index'],axis=1,inplace=True)
@@ -815,13 +836,7 @@ class Yunbase():
 
                         else:
                             raise ValueError(f"Yunbase can't support {agg}")  
-   
-        
-        if len(self.word2vec_models):#word2vec transform
-            self.word2vec_cols=[]
-            for (model,col,model_name) in self.word2vec_models:
-                self.word2vec_cols.append(col)
-                df[col]=df[col].fillna('nan').apply( lambda x: self.clean_text(x)  )
+
            
         if (mode=='train') and (self.use_high_corr_feat==False):#drop high correlation features
             print("< drop high correlation feature >")
@@ -918,7 +933,7 @@ class Yunbase():
 
         if len(self.word2vec_models):
             print("< word2vec >")
-            for (word2vec,col,model_name) in self.word2vec_models:
+            for (word2vec,col,model_name,use_svd) in self.word2vec_models:
                 col=self.colname_clean([col])[0]
                 self.PrintColor(f"-> for column {col} {model_name} word2vec feature",color=Fore.RED)
                 #tfidf,countvec
@@ -957,7 +972,7 @@ class Yunbase():
                         word2vec_feats.append(vector)
                     word2vec_feats=np.array(word2vec_feats)
 
-                if self.use_svd:
+                if use_svd:
                     try:
                         svd=self.trained_svd[f'{model_name}_svd_{col}_repeat{repeat}_fold{fold}.model']
                     except:
@@ -1900,7 +1915,7 @@ class Yunbase():
         self.sample_weight=self.train[self.weight_col]
         self.train.drop([self.weight_col],axis=1,inplace=True)
         self.target_dtype=self.train[self.target_col].dtype
-        try:#list_cols TypeError: unhashable type: 'list'
+        try:#deal with TypeError: unhashable type: 'list'
             self.train=self.train.drop_duplicates()
         except:
             pass
