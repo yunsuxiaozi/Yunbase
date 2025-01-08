@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/01/06
+@update_time:2025/01/08
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -872,7 +872,7 @@ class Yunbase():
                             quantile_range=(5.0,95.0),
                         )
                     scaler.fit(df[col].values.reshape(-1,1))
-                    self.pickle_dump(scaler,self.model_save_path+f'robustscaler_{col}.model')
+                    self.pickle_dump(scaler,self.model_save_path+f'robustscaler_{col}_{self.target_col}.model')
                     self.trained_scaler[f'robustscaler_{col}.model']=copy.deepcopy(scaler)
                 df[col] = scaler.transform(df[col].values.reshape(-1,1))
                 df[col]=df[col].clip(-5,5)
@@ -893,7 +893,7 @@ class Yunbase():
                 le={}
                 for k,v in value.items():
                     le[k]=len(le)
-                self.pickle_dump(le,self.model_save_path+f'le_{col}_repeat{repeat}_fold{fold}.model')
+                self.pickle_dump(le,self.model_save_path+f'le_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model')
                 self.trained_le[f'le_{col}_repeat{repeat}_fold{fold}.model']=copy.deepcopy(le)
             df[col] = df[col].apply(lambda x:le.get(x,0)) 
         return df
@@ -916,7 +916,7 @@ class Yunbase():
                     agg_df.columns = [ f'{g_col}_transform_{x}' for x in agg_df.columns if x!=g_col]
                     category_transformer[f"{g_col}__{t_col}"]=agg_df#'__'Used to distinguish '_'. 
                 #save category_transformer
-                self.pickle_dump(category_transformer,self.model_save_path+f'category_transfomrer_repeat{repeat}_fold{fold}.model')
+                self.pickle_dump(category_transformer,self.model_save_path+f'category_transfomrer_repeat{repeat}_fold{fold}_{self.target_col}.model')
                 self.trained_category_transformer[f'category_transfomrer_repeat{repeat}_fold{fold}.model']=copy.deepcopy(category_transformer)
             #transform
             for k,agg_df in category_transformer.items():
@@ -943,7 +943,7 @@ class Yunbase():
                         word2vec=self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]
                     except:
                         word2vec.fit(df[col])
-                        self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}.model') 
+                        self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model') 
                         self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]=copy.deepcopy(word2vec)
                     word2vec_feats=word2vec.transform(df[col]).toarray()
                 else:#word2vec from gensim  Word2Vec(vector_size=256, window=5, min_count=2, workers=16)
@@ -956,7 +956,7 @@ class Yunbase():
                         word2vec_copy.build_vocab(texts_split)
                         word2vec_copy.train(texts_split, total_examples=word2vec_copy.corpus_count,
                                        epochs=word2vec_copy.epochs)
-                        self.pickle_dump(word2vec_copy,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}.model') 
+                        self.pickle_dump(word2vec_copy,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model') 
                         self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]=copy.deepcopy(word2vec_copy)
                     #transform 
                     word2vec_feats = []
@@ -980,7 +980,7 @@ class Yunbase():
                                             n_iter=10, random_state=self.seed)
                         svd.fit(word2vec_feats)
                         self.trained_svd[f'{model_name}_svd_{col}_repeat{repeat}_fold{fold}.model']=copy.deepcopy(svd)
-                        self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_svd_{col}_repeat{repeat}_fold{fold}.model') 
+                        self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_svd_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model') 
                     word2vec_feats=svd.transform(word2vec_feats)
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
@@ -1073,17 +1073,17 @@ class Yunbase():
                     return roc_auc_score(y_true,y_pred)
             elif self.metric=='f1_score':
                 #lgb_eval_metric or Metric(target,oof_preds)?
-                try:
+                if y_pred.shape==(len(y_pred),self.num_classes):
                     y_pred=np.argmax(y_pred,axis=1)#transform probability to label
-                except:
-                    pass
+                else:#shape==len(y_pred), maybe:[0.1,0.9],maybe:[0,1]
+                    y_pred=np.round(y_pred)
                 return f1_score(y_true, y_pred)
             elif self.metric=='mcc':
                 #lgb_eval_metric or Metric(target,oof_preds)?
-                try:
+                if y_pred.shape==(len(y_pred),self.num_classes):
                     y_pred=np.argmax(y_pred,axis=1)#transform probability to label
-                except:
-                    pass
+                else:#shape==len(y_pred), maybe:[0.1,0.9],maybe:[0,1]
+                    y_pred=np.round(y_pred)
                 return matthews_corrcoef(y_true, y_pred)
             elif self.metric in ['logloss','multi_logloss']:
                 y_true=np.eye(self.num_classes)[y_true]
@@ -1456,7 +1456,7 @@ class Yunbase():
                             feature_importance=feature_importance/np.sum(feature_importance)
                             feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
                             feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
-                            self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold{fold}_feature_importance.pkl')
+                            self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold{fold}_{self.target_col}_feature_importance.pkl')
                             bestk,worstk=min(10,int(len(origin_features)*0.1+1)),min(10,int(len(origin_features)*0.1+1))
                             print(f"top{bestk} best features is :{list(feat_import_dict.keys())[:bestk]}")
                             print(f"top{worstk} worst features is :{list(feat_import_dict.keys())[-worstk:]}")
@@ -1478,8 +1478,8 @@ class Yunbase():
                         valid_pred=np.expm1(valid_pred)-self.exp_mode_b
                         y_valid=np.expm1(y_valid)-self.exp_mode_b
                     if self.save_oof_preds:#if oof_preds is needed
-                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}_target.npy",y_valid.values)
-                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}_valid_pred.npy",valid_pred)
+                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}_{self.target_col}_target.npy",y_valid.values)
+                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}_{self.target_col}_valid_pred.npy",valid_pred)
                     
                     if use_weighted_metric:#only support custom_metric
                         CV_score.append(self.Metric(y_valid,valid_pred,valid_weight))
@@ -1487,7 +1487,7 @@ class Yunbase():
                         CV_score.append(self.Metric(y_valid,valid_pred)) 
 
                     if 'tabnet' not in model_name:
-                        self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}.model')
+                        self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}_{self.target_col}.model')
                     metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
                     print(f"{metric}:{CV_score[-1]}")
                 self.PrintColor(f"mean_{metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
@@ -1564,7 +1564,7 @@ class Yunbase():
                         )
             else:
                 model.fit(X_train,y_train)
-            self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{self.num_folds}.model')
+            self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{self.num_folds}_{self.target_col}.model')
             #inference
             if self.objective=='regression':
                 test_pred=self.predict_batch(model=model,test_X=test_X)
@@ -1572,7 +1572,7 @@ class Yunbase():
                 test_pred=self.predict_proba_batch(model=model,test_X=test_X)
             test_preds.append(test_pred)
         if self.save_test_preds:#True
-            np.save(self.model_save_path+'test_preds.npy',test_preds)
+            np.save(self.model_save_path+f'_{self.target_col}_test_preds.npy',test_preds)
         test_preds=np.mean(test_preds,axis=0)
         if self.objective!='regression':
             if self.metric=='auc':
@@ -1755,7 +1755,7 @@ class Yunbase():
                     feature_importance=feature_importance/np.sum(feature_importance)
                     feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
                     feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
-                    self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_repeat{repeat}_fold{fold}_feature_importance.pkl')
+                    self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_repeat{repeat}_fold{fold}_{self.target_col}_feature_importance.pkl')
                     bestk,worstk=min(10,int(len(origin_features)*0.1+1)),min(10,int(len(origin_features)*0.1+1))
                     print(f"top{bestk} best features is :{list(feat_import_dict.keys())[:bestk]}")
                     print(f"top{worstk} worst features is :{list(feat_import_dict.keys())[-worstk:]}")
@@ -1781,7 +1781,7 @@ class Yunbase():
                     oof_preds[valid_index]=model.predict_proba(X_valid.to_numpy())
             if not use_optuna:#not find_params(training)
                 if 'tabnet' not in model_name:
-                    self.pickle_dump(model,self.model_save_path+f'{model_name}_repeat{repeat}_fold{fold}.model')
+                    self.pickle_dump(model,self.model_save_path+f'{model_name}_repeat{repeat}_fold{fold}_{self.target_col}.model')
                 self.trained_models.append(copy.deepcopy(model))
             
             del X_train,y_train,X_valid,y_valid
@@ -1795,7 +1795,7 @@ class Yunbase():
             CIR=CenteredIsotonicRegression().fit(oof_preds,y)
             oof_preds=CIR.transform(oof_preds)
             #save CIR models
-            self.pickle_dump(CIR,self.model_save_path+f'CIR_{model_name}_repeat{repeat}_fold{fold}.model')
+            self.pickle_dump(CIR,self.model_save_path+f'CIR_{model_name}_repeat{repeat}_fold{fold}_{self.target_col}.model')
             self.trained_CIR.append(copy.deepcopy(CIR))
             del CIR
             gc.collect()
@@ -1807,6 +1807,7 @@ class Yunbase():
     #This function does not perform any feature engineering.
     def adversarial_validation(self,train:pd.DataFrame,test:pd.DataFrame,
                                     target_col:str='target'):
+        train,test=train.copy(),test.copy()
         #drop object cols
         object_cols=[col for col in train.columns if col!=target_col and train[col].dtype==object]
         train.drop(object_cols,axis=1,inplace=True)
@@ -1829,7 +1830,8 @@ class Yunbase():
         self.metric,self.objective='auc','binary'
         
         oof_preds,metric_score=self.cross_validation(X=X,y=y,group=None,kf_folds=kf_folds,
-                         model=LGBMClassifier(n_estimators=256,metric='auc'),
+                         model=LGBMClassifier(n_estimators=256,metric='auc',
+                                              colsample_bytree=0.8,colsample_bynode=0.8),
                          model_name='lgb_adversarial_validation',
                          sample_weight=sample_weight,
                          use_optuna=False,repeat=0,num_folds=5,CV_FE=None,
@@ -2142,15 +2144,15 @@ class Yunbase():
                 self.PrintColor(f"{metric}------------------------------>{metric_score}",color = Fore.RED)
 
                 if self.save_oof_preds:#if oof_preds is needed
-                    np.save(self.model_save_path+f"{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}.npy",oof_preds)
+                    np.save(self.model_save_path+f"{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy",oof_preds)
 
     def cal_final_score(self,weights):
         #calculate oof score if save_oof_preds
         if self.save_oof_preds:
             for repeat in range(self.n_repeats):
-                oof_preds=np.zeros_like(np.load(self.model_save_path+f"{self.models[0//self.num_folds][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}.npy"))
+                oof_preds=np.zeros_like(np.load(self.model_save_path+f"{self.models[0//self.num_folds][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy"))
                 for i in range(0,len(weights)//self.n_repeats,self.num_folds):
-                    oof_pred=np.load(self.model_save_path+f"{self.models[i//self.num_folds][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}.npy")
+                    oof_pred=np.load(self.model_save_path+f"{self.models[i//self.num_folds][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy")
                     oof_preds+=weights[i+repeat*self.num_folds]*oof_pred
                 oof_preds=oof_preds/len(self.models)
                 metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
@@ -2270,7 +2272,7 @@ class Yunbase():
                     self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)
                     
             if self.save_test_preds:
-                np.save(self.model_save_path+'test_preds.npy',test_preds)
+                np.save(self.model_save_path+f'_{self.target_col}_test_preds.npy',test_preds)
             if self.use_median_as_pred:
                 test_preds=np.median(test_preds,axis=0)
             else:
@@ -2298,7 +2300,7 @@ class Yunbase():
                     test_preds[idx]=test_pred
                 
                 if self.save_test_preds:
-                    np.save(self.model_save_path+'test_preds.npy',test_preds)
+                    np.save(self.model_save_path+f'_{self.target_col}_test_preds.npy',test_preds)
                 if self.use_median_as_pred:
                     test_preds=np.median(test_preds,axis=0)
                 else:
@@ -2361,7 +2363,7 @@ class Yunbase():
                     self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds_class{c}']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)[:,c]
                     
         if self.save_test_preds:
-            np.save(self.model_save_path+'test_preds.npy',test_preds)
+            np.save(self.model_save_path+f'_{self.target_col}_test_preds.npy',test_preds)
         test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
         
         #use pseudo label
@@ -2385,10 +2387,10 @@ class Yunbase():
                 test_preds[fold]=test_pred
                 fold+=1
             if self.save_test_preds:
-                np.save(self.model_save_path+'test_preds.npy',test_preds)
+                np.save(self.model_save_path+f'_{self.target_col}_test_preds.npy',test_preds)
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
         self.PrintColor(f"idx2target={self.idx2target}",color=Fore.RED)
-        self.pickle_dump(self.idx2target,self.model_save_path+'idx2target.pkl')
+        self.pickle_dump(self.idx2target,self.model_save_path+f'_{self.target_col}_idx2target.pkl')
         
         return test_preds        
         
