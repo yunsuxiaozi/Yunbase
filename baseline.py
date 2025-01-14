@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/01/08
+@update_time:2025/01/14
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -17,7 +17,7 @@ from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,G
 #metrics
 from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
 #models(lgb,xgb,cat,ridge,lr,tabnet)
-from sklearn.linear_model import Ridge,LinearRegression,LogisticRegression
+from sklearn.linear_model import Ridge,LinearRegression,LogisticRegression,Lasso
 #fit(oof_preds,target)
 from cir_model import CenteredIsotonicRegression
 from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
@@ -192,7 +192,7 @@ class Yunbase():
                                 'accuracy','multi_logloss',#multi_class or classification
                                ]
         #current supported models
-        self.supported_models=['lgb','cat','xgb','ridge','LinearRegression','LogisticRegression','tabnet',
+        self.supported_models=['lgb','cat','xgb','ridge','Lasso','LinearRegression','LogisticRegression','tabnet',
                                 'Word2Vec','tfidfvec','countvec',
                               ]
         #current supported kfold.
@@ -223,7 +223,7 @@ class Yunbase():
         
         self.custom_metric=custom_metric#function
         if self.custom_metric!=None:
-            self.metric=self.custom_metric.__name__
+            self.metric=self.custom_metric.__name__.lower()
         else:
             self.metric=metric.lower()
         if self.metric not in self.supported_metrics and self.custom_metric==None:
@@ -348,7 +348,6 @@ class Yunbase():
                      'drop_cols':self.drop_cols,'group_col':self.group_col,'num_classes':self.num_classes,
                      'target_col':self.target_col,'infer_size':self.infer_size,'device':self.device,
                      'cross_cols':self.cross_cols,'labelencoder_cols':self.labelencoder_cols,
-                     #2025/01/06 need to be updated.
                      
                      'text_cols':self.text_cols,'plot_feature_importance':self.plot_feature_importance,
                      'save_oof_preds':self.save_oof_preds,'save_test_preds':self.save_test_preds,
@@ -628,8 +627,14 @@ class Yunbase():
         #object that need to be dropped, so it needs to be placed before finding these columns.
         if len(self.text_cols):
             print("< text column's feature >")
-            for tcol in self.text_cols:  
-                df=self.text_FE(df,tcol)
+            for tcol in self.text_cols:
+                #category text
+                if df[tcol].nunique()<0.5*len(df):
+                    text_map_df=pd.DataFrame({tcol:df[tcol].unique()})
+                    text_agg_df=self.text_FE(text_map_df,tcol)
+                    df=df.merge(text_agg_df,on=tcol,how='left')
+                else:
+                    df=self.text_FE(df,tcol)
         
         if mode=='train':
             #missing value 
@@ -650,10 +655,10 @@ class Yunbase():
             self.object_cols=[col for col in df.drop(self.drop_cols+self.category_cols,axis=1,errors='ignore').columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
             #one_hot_cols
             self.one_hot_cols=[]
-            self.nunique_2_cols=[]
+            self.nunique2_cols=[]
             for col in df.drop(
                 [self.target_col,self.group_col,self.weight_col]+\
-                self.list_cols+self.category_cols+self.drop_cols
+                self.list_cols+self.drop_cols
                 ,axis=1,errors='ignore'
             ).columns:
                 if (df[col].dtype==object) and not (
@@ -672,7 +677,7 @@ class Yunbase():
                     if (df[col].nunique()<self.one_hot_max) and (df[col].nunique()>2):
                         self.one_hot_cols.append([col,list(df[col].value_counts().to_dict().keys())]) 
                     elif (self.one_hot_max>=2) and (df[col].nunique()==2):
-                        self.nunique_2_cols.append([col,list(df[col].unique())[0]])
+                        self.nunique2_cols.append([col,list(df[col].unique())[0]])
         
         df=pl.from_pandas(df)
         if self.one_hot_max>1:
@@ -693,8 +698,8 @@ class Yunbase():
                     self.onehot_valuecounts[col]=col_valuecounts
                 df=df.with_columns(pl.col(col).replace(col_valuecounts,default=np.nan).alias(col+"_valuecounts"))
                 df=df.with_columns((pl.col(col+"_valuecounts")>=5)*pl.col(col+"_valuecounts"))    
-            for i in range(len(self.nunique_2_cols)):
-                c,u=self.nunique_2_cols[i]
+            for i in range(len(self.nunique2_cols)):
+                c,u=self.nunique2_cols[i]
                 df=df.with_columns((pl.col(c)==u).cast(pl.Int8).alias(f"{c}_{u}"))
         df=df.to_pandas()
 
@@ -1343,8 +1348,7 @@ class Yunbase():
         
         self.train.columns=self.colname_clean(list(self.train.columns))
         self.test.columns=self.colname_clean(list(self.test.columns))
-        
-        train_columns=list(self.train.columns)
+        self.date_col=self.colname_clean([self.date_col])[0]
         
         if not only_inference:
             self.PrintColor("purged CV")
@@ -1741,7 +1745,7 @@ class Yunbase():
                         eval_set=[(X_valid.to_numpy(), y_valid.to_numpy())],
                         batch_size=1024,
                     )
-            else:#other models such as ridge,LinearRegression
+            else:#other models such as ridge,LinearRegression,LogisticRegression,
                 model.fit(X_train,y_train) 
 
             #print feature importance when not use optuna to find params.
@@ -1826,8 +1830,8 @@ class Yunbase():
         for fold, (train_index, valid_index) in (enumerate(kf.split(X,y))):
             kf_folds['fold'][valid_index]=fold
 
-        temp_metric,temp_objective=self.metric,self.objective
-        self.metric,self.objective='auc','binary'
+        temp_metric,temp_objective,temp_num_classes=self.metric,self.objective,self.num_classes
+        self.metric,self.objective,self.num_classes='auc','binary',2
         
         oof_preds,metric_score=self.cross_validation(X=X,y=y,group=None,kf_folds=kf_folds,
                          model=LGBMClassifier(n_estimators=256,metric='auc',
@@ -1844,7 +1848,7 @@ class Yunbase():
                         )
         self.PrintColor(f"{self.metric}------------------------------>{metric_score}",color = Fore.RED)
 
-        self.metric,self.objective=temp_metric,temp_objective
+        self.metric,self.objective,self.num_classes=temp_metric,temp_objective,temp_num_classes
         self.trained_models=[]
     
     def drop_high_correlation_feats(self,df:pd.DataFrame)->None:
@@ -2256,7 +2260,7 @@ class Yunbase():
             self.test.columns=self.colname_clean(list(self.test.columns))
             print(f"test.shape:{self.test.shape}")
             self.PrintColor("prediction on test data")
-            test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test)))
+            test_preds=np.zeros((len(self.models)*self.n_repeats,len(self.test)))
             for idx in range(len(self.trained_models)): 
                 test_copy=self.CV_stat(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
                 test_copy=self.CV_FE(test_copy,mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
@@ -2267,7 +2271,11 @@ class Yunbase():
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
                 if self.use_CIR:
                     test_pred=self.trained_CIR[idx//self.num_folds].transform(test_pred)
-                test_preds[idx]=test_pred
+                
+                test_preds[idx//self.num_folds]+=test_pred
+                if idx%self.num_folds==self.num_folds-1:
+                    test_preds[idx//self.num_folds]/=self.num_folds
+                    
                 if self.use_oof_as_feature and idx%self.num_folds==self.num_folds-1:
                     self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)
                     
@@ -2288,7 +2296,7 @@ class Yunbase():
                 #calculate oof score if save_oof_preds
                 self.cal_final_score(weights)
                 
-                test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test)))
+                test_preds=np.zeros((len(self.models)*self.n_repeats,len(self.test)))
                 for idx in range(len(self.trained_models)):
                     test_copy=self.CV_stat(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
                     test_copy=self.CV_FE(test_copy,mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds))
@@ -2297,7 +2305,10 @@ class Yunbase():
                     except:
                         test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                         test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
-                    test_preds[idx]=test_pred
+                    
+                    test_preds[idx//self.num_folds]+=test_pred
+                    if idx%self.num_folds==self.num_folds-1:
+                        test_preds[idx//self.num_folds]/=self.num_folds
                 
                 if self.save_test_preds:
                     np.save(self.model_save_path+f'_{self.target_col}_test_preds.npy',test_preds)
@@ -2311,7 +2322,7 @@ class Yunbase():
         else:#classification 
             #(len(self.test),self.num_classes)
             test_preds=self.predict_proba(test_path_or_file,weights)
-            if self.metric=='auc':
+            if 'auc' in self.metric:
                 return test_preds[:,1]
             else:
                 return np.argmax(test_preds,axis=1)          
@@ -2348,7 +2359,7 @@ class Yunbase():
         self.test.columns=self.colname_clean(list(self.test.columns))
         print(f"test.shape:{self.test.shape}")
         self.PrintColor("prediction on test data")
-        test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
+        test_preds=np.zeros((len(self.models)*self.n_repeats,len(self.test),self.num_classes))
         for idx in range(len(self.trained_models)):
             test_copy=self.CV_stat(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
             test_copy=self.CV_FE(test_copy,mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds))
@@ -2357,7 +2368,10 @@ class Yunbase():
             except:
                 test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                 test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
-            test_preds[idx]=test_pred
+            
+            test_preds[idx//self.num_folds]+=test_pred
+            if idx%self.num_folds==self.num_folds-1:
+                test_preds[idx//self.num_folds]/=self.num_folds
             if self.use_oof_as_feature and idx%self.num_folds==self.num_folds-1:
                 for c in range(self.num_classes):
                     self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds_class{c}']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)[:,c]
@@ -2374,8 +2388,7 @@ class Yunbase():
                      self.date_cols,self.target2idx)
             #calculate oof score if save_oof_preds
             self.cal_final_score(weights)
-            test_preds=np.zeros((len(self.models)*self.num_folds*self.n_repeats,len(self.test),self.num_classes))
-            fold=0
+            test_preds=np.zeros((len(self.models)*self.n_repeats,len(self.test),self.num_classes))
             for idx in range(len(self.trained_models)):
                 test_copy=self.CV_stat(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
                 test_copy=self.CV_FE(test_copy,mode='test',fold=idx%self.num_folds, repeat=idx//(len(self.models)*self.num_folds))
@@ -2384,8 +2397,10 @@ class Yunbase():
                 except:
                     test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                     test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
-                test_preds[fold]=test_pred
-                fold+=1
+                test_preds[idx//self.num_folds]+=test_pred
+                if idx%self.num_folds==self.num_folds-1:
+                    test_preds[idx//self.num_folds]/=self.num_folds
+                
             if self.save_test_preds:
                 np.save(self.model_save_path+f'_{self.target_col}_test_preds.npy',test_preds)
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
@@ -2464,9 +2479,10 @@ class Yunbase():
         submission=self.load_data(submission_path_or_file,mode='submission')
         submission[self.target_col]=test_preds
         if self.objective!='regression':
-            if self.metric!='auc':
+            #auc and your custom auc metric
+            if 'auc' not in self.metric:
                 submission[self.target_col]=submission[self.target_col].apply(lambda x:self.idx2target[x])
         #deal with bool.
-        if self.metric!='auc':
+        if 'auc'  not in self.metric:
             submission[self.target_col]=submission[self.target_col].astype(self.target_dtype)
         submission.to_csv(f"{save_name}.csv",index=None)
