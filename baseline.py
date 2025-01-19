@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/01/14
+@update_time:2025/01/19
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -15,12 +15,12 @@ import seaborn as sns
 #current supported kfold
 from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,GroupKFold
 #metrics
-from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef
+from sklearn.metrics import roc_auc_score,f1_score,matthews_corrcoef,precision_recall_curve, auc
 #models(lgb,xgb,cat,ridge,lr,tabnet)
 from sklearn.linear_model import Ridge,LinearRegression,LogisticRegression,Lasso
 #fit(oof_preds,target)
 from cir_model import CenteredIsotonicRegression
-from  lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
+from lightgbm import LGBMRegressor,LGBMClassifier,log_evaluation,early_stopping
 from catboost import CatBoostRegressor,CatBoostClassifier
 from xgboost import XGBRegressor,XGBClassifier
 from pytorch_tabnet.tab_model import TabNetRegressor,TabNetClassifier
@@ -188,7 +188,7 @@ class Yunbase():
         #currented supported metric
         self.supported_metrics=['custom_metric',#your custom_metric
                                 'mae','rmse','mse','medae','rmsle','msle','mape','r2','smape',#regression
-                                'auc','logloss','f1_score','mcc',#binary metric
+                                'auc','pr_auc','logloss','f1_score','mcc',#binary metric
                                 'accuracy','multi_logloss',#multi_class or classification
                                ]
         #current supported models
@@ -250,7 +250,7 @@ class Yunbase():
         self.use_optuna_find_params=use_optuna_find_params
         self.optuna_direction=optuna_direction
         self.direction2metric={
-            'maximize':['accuracy','auc','f1_score','mcc',#classification
+            'maximize':['accuracy','auc','pr_auc','f1_score','mcc',#classification
                         'r2'#regression
                        ],
             'minimize':['medae','mape','mae','rmse','mse','rmsle','msle','smape',#regression
@@ -407,10 +407,10 @@ class Yunbase():
         #memory_usage()是df每列的内存使用量,sum是对它们求和, B->KB->MB
         start_mem = df.memory_usage().sum() / 1024**2
         print('Memory usage of dataframe is {:.2f} MB'.format(start_mem))
-        for col in df.columns:#遍历每列的列名
-            col_type = df[col].dtype#列名的type
-            if col_type != object and str(col_type)!='category':#不是object也就是说这里处理的是数值类型的变量
-                c_min,c_max = df[col].min(),df[col].max() #求出这列的最大值和最小值
+        for col in df.columns:
+            col_type = df[col].dtype
+            if col_type != object and str(col_type)!='category':#num_col
+                c_min,c_max = df[col].min(),df[col].max()
                 if str(col_type)[:3] == 'int':#如果是int类型的变量,不管是int8,int16,int32还是int64
                     #如果这列的取值范围是在int8的取值范围内,那就对类型进行转换 (-128 到 127)
                     if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
@@ -458,8 +458,9 @@ class Yunbase():
         #remove <b>  <p> meaningless
         html=re.compile(r'<.*?>')
         text=html.sub(r'',text)
-        #remove url '\w+':(word character,[a-zA-Z0-9_])
-        text=re.sub("http\w+",'',text)
+        #remove urls '\w+':(word character,[a-zA-Z0-9_])
+        #thanks to https://github.com/yunsuxiaozi/Yunbase/issues/1
+        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
         #remove @yunsuxiaozi   person_name 
         text=re.sub("@\w+",'',text)
         #drop single character,they are meaningless. 'space a space'
@@ -650,6 +651,9 @@ class Yunbase():
                 elif len(list(df[col].value_counts().to_dict().items()))>0:
                     if list(df[col].value_counts().to_dict().items())[0][1]>=len(df)*0.99:
                         self.unique_cols.append(col)
+                #num_cols and low_var
+                elif (df[col].dtype!=object) and (df[col].std()/df[col].mean()<0.01):
+                    self.unique_cols.append(col)        
             
             #object dtype
             self.object_cols=[col for col in df.drop(self.drop_cols+self.category_cols,axis=1,errors='ignore').columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
@@ -858,6 +862,10 @@ class Yunbase():
         
         print("< drop useless cols >")
         total_drop_cols=self.nan_cols+self.unique_cols+drop_cols+self.high_corr_cols
+        print(f"nan_cols:{self.nan_cols}")
+        print(f"unique_cols:{self.unique_cols}")
+        print(f"drop_cols:{drop_cols}")
+        print(f"high_corr_cols:{self.high_corr_cols}")
         total_drop_cols=[col for col in total_drop_cols if col not in \
                          self.word2vec_cols+self.labelencoder_cols+self.category_cols]
         df.drop(total_drop_cols,axis=1,inplace=True,errors='ignore')
@@ -1073,9 +1081,15 @@ class Yunbase():
             elif self.metric=='auc':
                 #lgb_eval_metric or Metric(target,oof_preds)?
                 if y_pred.shape==(len(y_pred),self.num_classes):
-                    return roc_auc_score(y_true,y_pred[:,1])
-                else:
-                    return roc_auc_score(y_true,y_pred)
+                    y_pred=y_pred[:,1]
+                return roc_auc_score(y_true,y_pred)
+            #https://www.kaggle.com/competitions/phems-hackathon-early-sepsis-prediction
+            elif self.metric=='pr_auc':
+                if y_pred.shape==(len(y_pred),self.num_classes):
+                    y_pred=y_pred[:,1]
+                precision, recall, thresholds = precision_recall_curve(y_true, y_pred)
+                pr_auc = auc(recall, precision)
+                return pr_auc
             elif self.metric=='f1_score':
                 #lgb_eval_metric or Metric(target,oof_preds)?
                 if y_pred.shape==(len(y_pred),self.num_classes):
@@ -1960,7 +1974,7 @@ class Yunbase():
             if self.objective=='multi_class':
                 metric='multi_logloss'
             #lightgbm don't support f1_score,but we will calculate f1_score as Metric.
-            if metric in ['f1_score','mcc','logloss']:
+            if metric in ['f1_score','mcc','logloss','pr_auc','accuracy']:
                 metric='auc'
             elif metric in ['medae','mape','smape']:
                 metric='mae'
@@ -1973,8 +1987,6 @@ class Yunbase():
                     metric='auc'
                 elif self.objective=='multi_class':
                     metric='multi_logloss'
-            if metric=='accuracy':
-                metric='auc'
             lgb_params={"boosting_type": "gbdt","metric": metric,
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.1,
                         "n_estimators": 20000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
@@ -2010,7 +2022,7 @@ class Yunbase():
             # 'UserQuerywiseMetric','NumErrors', 'FairLoss', 'BalancedAccuracy','Combination',
             # 'BalancedErrorRate', 'BrierScore', 'Precision', 'Recall', 'TotalF1', 'F', 'MCC', 
             # 'ZeroOneLoss', 'HammingLoss', 'HingeLoss', 'Kappa', 'WKappa', 'LogLikelihoodOfPrediction',
-            # 'NormalizedGini', 'PRAUC', 'PairAccuracy', 'AverageGain', 'QueryAverage', 'QueryAUC',
+            # 'NormalizedGini','PairAccuracy', 'AverageGain', 'QueryAverage', 'QueryAUC',
             # 'PFound', 'PrecisionAt', 'RecallAt', 'MAP', 'NDCG', 'DCG', 'FilteredDCG', 'MRR', 'ERR', 
             # 'SurvivalAft', 'MultiRMSE', 'MultiRMSEWithMissingValues', 'MultiLogloss', 'MultiCrossEntropy',
 
@@ -2020,8 +2032,7 @@ class Yunbase():
                            'mae':'MAE','medae':'MAE','mape':'MAPE','r2':'R2','smape':'SMAPE',
                           #classification
                            'accuracy':'Accuracy','logloss':'Logloss','multi_logloss':'Accuracy',
-                           'f1_score':'F1','auc':'AUC','mcc':'MCC',
-                          
+                           'f1_score':'F1','auc':'AUC','mcc':'MCC','pr_auc':'PRAUC',
                           }
             metric=metric2params.get(self.metric,'None')
             
