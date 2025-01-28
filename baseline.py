@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/01/19
+@update_time:2025/01/28
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -186,11 +186,13 @@ class Yunbase():
         """
         
         #currented supported metric
-        self.supported_metrics=['custom_metric',#your custom_metric
-                                'mae','rmse','mse','medae','rmsle','msle','mape','r2','smape',#regression
-                                'auc','pr_auc','logloss','f1_score','mcc',#binary metric
-                                'accuracy','multi_logloss',#multi_class or classification
-                               ]
+        self.reg_metric=['mae','rmse','mse','medae','rmsle','msle','mape','r2','smape',#regression
+                        ]
+        self.cla_metric=['auc','pr_auc','logloss','f1_score','mcc',#binary metric
+                        'accuracy','multi_logloss',#multi_class or classification
+                        ]
+        self.supported_metrics=['custom_metric']+self.reg_metric+self.cla_metric
+                               
         #current supported models
         self.supported_models=['lgb','cat','xgb','ridge','Lasso','LinearRegression','LogisticRegression','tabnet',
                                 'Word2Vec','tfidfvec','countvec',
@@ -342,21 +344,26 @@ class Yunbase():
         self.weight_col=weight_col
 
     def get_params(self,):        
-        params_dict={'num_folds':self.num_folds,'seed':self.seed,'nan_margin':self.nan_margin,
-                     'models':self.models,'objective':self.objective,
-                     'metric':self.metric,'custom_metric':self.custom_metric,
-                     'drop_cols':self.drop_cols,'group_col':self.group_col,'num_classes':self.num_classes,
-                     'target_col':self.target_col,'infer_size':self.infer_size,'device':self.device,
-                     'cross_cols':self.cross_cols,'labelencoder_cols':self.labelencoder_cols,
-                     
-                     'text_cols':self.text_cols,'plot_feature_importance':self.plot_feature_importance,
-                     'save_oof_preds':self.save_oof_preds,'save_test_preds':self.save_test_preds,
-                     'one_hot_max':self.one_hot_max,'use_optuna_find_params':self.use_optuna_find_params,
-                     'optuna_direction':self.optuna_direction,'early_stop':self.early_stop,
-                     'use_pseudo_label':self.use_pseudo_label,'use_high_corr_feat':self.use_high_corr_feat,
-                     'log':self.log,'exp_mode':self.exp_mode,'use_reduce_memory':self.use_reduce_memory,
-                     'use_TTA':self.use_TTA,
-                     'AGGREGATIONS':self.AGGREGATIONS,'category_cols':self.category_cols,
+        params_dict={'num_folds':self.num_folds,'n_repeats':self.n_repeats,'models':self.models,
+                     'group_col':self.group_col,'target_col':self.target_col,'weight_col':self.weight_col,
+                     'drop_cols':self.drop_cols,'seed':self.seed,'objective':self.objective,
+                     'metric':self.metric,'nan_margin':self.nan_margin,'num_classes':self.num_classes,
+                     'infer_size':self.infer_size,'save_oof_preds':self.save_oof_preds,'save_test_preds':self.save_test_preds,
+                     'device':self.device,'one_hot_max':self.one_hot_max,'custom_metric':self.custom_metric,
+                     'use_optuna_find_params':self.use_optuna_find_params,'optuna_direction':self.optuna_direction,
+                     'early_stop':self.early_stop,'use_pseudo_label':self.use_pseudo_label,
+                     'use_high_corr_feat':self.use_high_corr_feat,'cross_cols':self.cross_cols,
+                     'labelencoder_cols':self.labelencoder_cols,'list_stat':self.list_stat,
+                     'word2vec_models':self.word2vec_models, 'text_cols':self.text_cols,
+                     'plot_feature_importance':self.plot_feature_importance,'log':self.log,
+                     'exp_mode':self.exp_mode,'use_reduce_memory':self.use_reduce_memory,
+                     'use_data_augmentation':self.use_data_augmentation,
+                     'use_oof_as_feature':self.use_oof_as_feature,'use_CIR':self.use_CIR,
+                     'use_median_as_pred':self.use_median_as_pred,'use_scaler':self.use_scaler,
+                     'use_TTA':self.use_TTA,'use_eval_metric':self.use_eval_metric,
+                     'feats_stat':self.feats_stat,'target_stat':self.target_stat,
+                     'use_spellchecker':self.use_spellchecker,'AGGREGATIONS':self.AGGREGATIONS,
+                     'category_cols':self.category_cols,
               }
         return params_dict
     
@@ -1210,6 +1217,8 @@ class Yunbase():
                 raise ValueError(f"one_hot_max must less than {len(train)}")
             for col in train.columns:
                 self.col2dtype[col]=train[col].dtype
+            if self.objective=='regression':
+                train[self.target_col]=train[self.target_col].astype(np.float32)
             return train
         elif mode=='test':
             test=file.copy()
@@ -2161,6 +2170,31 @@ class Yunbase():
                 if self.save_oof_preds:#if oof_preds is needed
                     np.save(self.model_save_path+f"{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy",oof_preds)
 
+    #calculate each model cross validation metric scores.
+    def CVMetricsSummary(self,):
+        if self.objective=='regression':
+            metrics=self.reg_metric
+        else:
+            metrics=self.cla_metric
+        temp_metric=self.metric
+        
+        summary_df=pd.DataFrame(np.zeros((0,len(self.models))))
+        summary_df.columns=[model_name for (model,model_name) in self.models]
+        for modeli in range(len(self.models)):
+            oof_preds=np.zeros_like(np.load(self.model_save_path+f"{self.models[0//self.num_folds][1]}_seed{self.seed}_repeat0_fold{self.num_folds}_{self.target_col}.npy"))
+            for repeat in range(self.n_repeats):
+                oof_preds+=np.load(self.model_save_path+f"{self.models[modeli][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy")
+            oof_preds=oof_preds/self.n_repeats
+            for metrici in range(len(metrics)):
+                self.metric=metrics[metrici]
+                try:
+                    #calculate each metric
+                    summary_df.loc[self.metric,self.models[modeli][1]]=self.Metric(self.target,oof_preds) 
+                except:
+                    summary_df.loc[self.metric,self.models[modeli][1]]=np.nan
+        self.metric=temp_metric
+        return summary_df
+    
     def cal_final_score(self,weights):
         #calculate oof score if save_oof_preds
         if self.save_oof_preds:
