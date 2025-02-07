@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/01/28
+@update_time:2025/02/07
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -328,7 +328,7 @@ class Yunbase():
         self.trained_wordvec={}
         self.trained_svd={}
         self.trained_scaler={}
-        self.trained_category_transformer={}
+        self.trained_TE={}#TargetEncoder
         self.onehot_valuecounts={}
         #make folder to save model trained.such as GBDT,word2vec.
         self.model_save_path="Yunbase_info/"
@@ -918,30 +918,48 @@ class Yunbase():
             df[col] = df[col].apply(lambda x:le.get(x,0)) 
         return df
 
+    #reference: https://www.kaggle.com/code/cdeotte/first-place-single-model-cv-1-016-lb-1-016   In[6]
     def CV_stat(self,X,y=None,repeat:int=0,fold:int=0):
         if len(self.target_stat):
             if type(y)==type(None):#valid set or test set(transform)
-                category_transformer=self.trained_category_transformer[f'category_transfomrer_repeat{repeat}_fold{fold}.model']
+                TE=self.trained_TE[f'TE_repeat{repeat}_fold{fold}.model']
             else:#train set(fit and transform)
                 y=pd.DataFrame({self.target_col:y.values})
                 df=pd.concat((X,y),axis=1)
-                #repeat i fold j's category_transformer  cat_col2value 
-                category_transformer={}
+                #repeat i fold j's TE  cat_col2value 
+                TE={}
                 for (g_col,t_col,agg) in self.target_stat:
                     g_col=self.colname_clean([g_col])[0]
                     if t_col!=self.target_col:
                         t_col=self.colname_clean([t_col])[0]
-                    agg_df = df[[g_col,t_col]].groupby(g_col).agg(agg)
+                        
+                    #deal with value_counts()<10 
+                    df_copy=df[[g_col,t_col]].copy()
+                    gcol2counts=df_copy[g_col].value_counts().to_dict()
+                    GCOLS=[gcol for gcol,count in gcol2counts.items() if count>min(10,len(df)//100) ]
+                    df_copy=df_copy[df_copy[g_col].isin(GCOLS)]
+                    
+                    agg_df = df_copy.groupby(g_col).agg(agg).reset_index()
                     agg_df.columns = ['_'.join(x) for x in agg_df.columns]
                     agg_df.columns = [ f'{g_col}_transform_{x}' for x in agg_df.columns if x!=g_col]
-                    category_transformer[f"{g_col}__{t_col}"]=agg_df#'__'Used to distinguish '_'. 
-                #save category_transformer
-                self.pickle_dump(category_transformer,self.model_save_path+f'category_transfomrer_repeat{repeat}_fold{fold}_{self.target_col}.model')
-                self.trained_category_transformer[f'category_transfomrer_repeat{repeat}_fold{fold}.model']=copy.deepcopy(category_transformer)
+                    agg_df=agg_df.rename(columns={f"{g_col}_transform_{g_col}_":g_col})
+                    TE[f"{g_col}_TE_{t_col}"]=agg_df
+                #save TE
+                self.pickle_dump(TE,self.model_save_path+f'TE_repeat{repeat}_fold{fold}_{self.target_col}.model')
+                self.trained_TE[f'TE_repeat{repeat}_fold{fold}.model']=copy.deepcopy(TE)
             #transform
-            for k,agg_df in category_transformer.items():
-                g_col=k.split("__")[0]
+            for k,agg_df in TE.items():
+                g_col,t_col=k.split("_TE_")
                 X=X.merge(agg_df,on=g_col,how='left')
+                #fillna
+                y=pd.DataFrame({self.target_col:self.target})
+                y=pd.concat((self.features,y),axis=1)
+                agg_df_columns=agg_df.drop([g_col],axis=1).columns
+                aggs=[a for c in list(agg_df_columns) for a in ['nunique','count','min','max','first','last',
+                               'mean','median','sum','std','skew'] if a in c]
+                agg_df_agg=y[t_col].agg(aggs).values
+                for i in range(len(agg_df_columns)):
+                    X[agg_df_columns[i]]=X[agg_df_columns[i]].fillna(agg_df_agg[i])
         return X 
     
     #Feature engineering that needs to be done internally in cross validation.
@@ -1665,7 +1683,7 @@ class Yunbase():
             y_train, y_valid = y.iloc[train_index].reset_index(drop=True), y.iloc[valid_index].reset_index(drop=True)
 
             if CV_stat!=None:
-                X_train=CV_stat(X=X_train,y=y_train,fold=fold,repeat=repeat  )
+                X_train=CV_stat(X=X_train,y=y_train,fold=fold,repeat=repeat )
                 X_valid=CV_stat(X=X_valid,fold=fold,repeat=repeat)
             
             if CV_FE!=None:
@@ -1963,7 +1981,8 @@ class Yunbase():
         if self.objective!='regression':
             y=self.set_target2idx(y,target2idx)
 
-        #save true label in train data to calculate final score  
+        #save true label in train data to calculate final score 
+        self.features=X
         self.target=y.values
         
         if self.exp_mode:#use log transform for target_col
@@ -2322,7 +2341,7 @@ class Yunbase():
                     test_preds[idx//self.num_folds]/=self.num_folds
                     
                 if self.use_oof_as_feature and idx%self.num_folds==self.num_folds-1:
-                    self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)
+                    self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds']=test_preds[idx//self.num_folds]
                     
             if self.save_test_preds:
                 np.save(self.model_save_path+f'_{self.target_col}_test_preds.npy',test_preds)
@@ -2419,7 +2438,7 @@ class Yunbase():
                 test_preds[idx//self.num_folds]/=self.num_folds
             if self.use_oof_as_feature and idx%self.num_folds==self.num_folds-1:
                 for c in range(self.num_classes):
-                    self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds_class{c}']=test_preds[idx+1-self.num_folds:idx+1].mean(axis=0)[:,c]
+                    self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds_class{c}']=test_preds[idx//self.num_folds][:,c]
                     
         if self.save_test_preds:
             np.save(self.model_save_path+f'_{self.target_col}_test_preds.npy',test_preds)
