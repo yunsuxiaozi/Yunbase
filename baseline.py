@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/02/07
+@update_time:2025/02/14
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -1693,8 +1693,11 @@ class Yunbase():
             sample_weight_valid=sample_weight.iloc[valid_index].reset_index(drop=True)
 
             if (use_pseudo_label) and (type(test)==pd.DataFrame):
+                test_copy=test.copy()
+                if CV_stat!=None:
+                    test_copy=CV_stat(X=test_copy,fold=fold,repeat=repeat)
                 if CV_FE!=None:
-                    test_copy=CV_FE(test.copy(),mode='test',fold=fold,repeat=repeat)
+                    test_copy=CV_FE(test_copy,mode='test',fold=fold,repeat=repeat)
                 test_X=test_copy.drop([group_col,target_col],axis=1,errors='ignore')
                 test_y=test_copy[target_col]
                 
@@ -2474,48 +2477,56 @@ class Yunbase():
         return test_preds        
         
     #ensemble some solutions.
-    def ensemble(self,solution_paths_or_files:list[str]=[],weights=None):
-        #If you don't set weights,then use mean value as result.
+    def ensemble(self,solution_paths_or_files:list[str]=[],id_col:str='id',target_col:str='',weights=None):
+        
+        #If you don't set weights,then use mean_value as result.
         n=len(solution_paths_or_files)
+        if n<2:#ensemble files not one file.
+            raise ValueError(f"length of solution_paths_or_files must be greater than 1.")
         if weights==None:
             weights=np.ones(n)
         if len(weights)!=n:
-            raise ValueError(f"length of weights must be len(solution_paths_or_files).")
+            raise ValueError(f"length of weights must be {len(solution_paths_or_files)}.")
         #normalization
         weights=weights/np.sum(weights)
 
+        if target_col=='':
+            target_col=self.target_col
+
+        solutions=[]
+        for i in range(n):
+            #file(pd.csv) or path(str)
+            solution=solution_paths_or_files[i]
+            if type(solution)==str:#path
+                try:
+                    solution=pl.read_csv(solution).to_pandas()
+                except:
+                    raise ValueError("Yunbase can only support csv file's path.")
+            if not isinstance(solution, pd.DataFrame):
+                raise ValueError(f"solution{i} is not pd.DataFrame.")
+            if sorted(list(solution.columns))!=sorted([id_col,target_col]):
+                raise ValueError(f"solution{i} must have 2 columns,{id_col} and {target_col}.")
+            #different file has different order.
+            solutions.append(solution.sort_values([id_col]).reset_index(drop=True))
+            
+        solution_ids=[sorted(solutions[i][id_col].values)  for i in range(n)]
+        for i in range(n):
+            for j in range(i+1,n):
+                if solution_ids[i]!=solution_ids[j]:
+                    raise ValueError(f"solution_files must have same ids,but {i} and {j} isn't same.")
+        
+        solution_files_len=[len(solutions[i]) for i in range(n)]
+        if len(np.unique(solution_files_len))!=1:
+            raise ValueError(f"solution_files must have same length,not {solution_files_len}")
+        ensemble_df=solutions[0].copy()
+        ensemble_df[target_col]=0
         #Weighted Sum of Continuous Values
         if (self.objective=='regression') or(self.metric=='auc'):
-            final_solutions=[]
             for i in range(n):
-                if type(solution_paths_or_files[i])==str:#csv file path
-                    try:
-                        solution=pl.read_csv(solution_paths_or_files[i])
-                        solution=solution.to_pandas()
-                    except:
-                        raise ValueError("Yunbase can only support csv file.")
-                else:#csv_file have load
-                    solution=solution_paths_or_files[i].copy()
-                if not isinstance(solution, pd.DataFrame):
-                    raise ValueError("solution_paths_or_files is not pd.DataFrame.")
-                final_solutions.append(weights[i]*solution[self.target_col].values)
-            final_solutions=np.sum(final_solutions,axis=0)
-            return final_solutions
+                ensemble_df[target_col]+=(weights[i]*solutions[i][target_col].values)
+            return ensemble_df
         else:#classification find mode
-            #n solutions,m datas
-            solutions=[]
-            for i in range(n):
-                if type(solution_paths_or_files[i])==str:
-                    try:
-                        solution=pl.read_csv(solution_paths_or_files[i])
-                        solution=solution.to_pandas()
-                    except:
-                        raise ValueError("Yunbase can only support csv file.")
-                else:#csv_file have load
-                    solution=solution_paths_or_files[i].copy()
-                if not isinstance(solution, pd.DataFrame):
-                    raise ValueError("solution_paths_or_files is not pd.DataFrame.")
-                solutions.append(solution[self.target_col].values)
+            solutions=[solutions[i][target_col].values for i in range(n)]
             final_solutions=[]
             for i in range(len(solutions[0])):
                 solution2count={}
@@ -2527,8 +2538,8 @@ class Yunbase():
                         solution2count[ solutions[j][i] ]=weights[j]
                 solution2count=dict(sorted(solution2count.items(),key=lambda x:-x[1]))
                 final_solutions.append(list(solution2count.keys())[0])
-            final_solutions=np.array(final_solutions)
-            return final_solutions
+            ensemble_df[target_col]=np.array(final_solutions)
+            return ensemble_df
 
     #save test_preds to submission.csv
     def submit(self,submission_path_or_file:str|pd.DataFrame='submission.csv',
