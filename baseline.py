@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/02/14
+@update_time:2025/02/21
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -67,6 +67,7 @@ class Yunbase():
                       group_col=None,
                       target_col:str='target',
                       weight_col:str='weight',
+                      kfold_col:str='fold',
                       drop_cols:list[str]=[],
                       seed:int=2025,
                       objective:str='regression',
@@ -123,6 +124,9 @@ class Yunbase():
         target_col            :the column that you want to predict.
         weight_col            :When training the model, give each sample a different weight. 
                                If you don't set it, the weight of each sample will default to 1.
+        kfold_col             :You can add the feature 'fold' to the training data, which allows you to 
+                               customize your own kfold. The values in this column are [0,1,..., 
+                               num_folds-1].
         drop_cols             :The column to be deleted after all feature engineering is completed.
         seed                  :random seed.
         objective             :what task do you want to do?regression,binary or multi_class?
@@ -198,7 +202,7 @@ class Yunbase():
                                 'Word2Vec','tfidfvec','countvec',
                               ]
         #current supported kfold.
-        self.supported_kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold','purged_CV']
+        self.supported_kfolds=['KFold','GroupKFold','StratifiedKFold','StratifiedGroupKFold','purged_CV','custom_kfold']
         #current supported objective.
         self.supported_objectives=['binary','multi_class','regression']
         
@@ -342,11 +346,12 @@ class Yunbase():
         #example:https://www.kaggle.com/competitions/home-credit-credit-risk-model-stability
         self.col2dtype={} 
         self.weight_col=weight_col
+        self.kfold_col=kfold_col
 
     def get_params(self,):        
         params_dict={'num_folds':self.num_folds,'n_repeats':self.n_repeats,'models':self.models,
                      'group_col':self.group_col,'target_col':self.target_col,'weight_col':self.weight_col,
-                     'drop_cols':self.drop_cols,'seed':self.seed,'objective':self.objective,
+                     'kfold_col':self.kfold_col,'drop_cols':self.drop_cols,'seed':self.seed,'objective':self.objective,
                      'metric':self.metric,'nan_margin':self.nan_margin,'num_classes':self.num_classes,
                      'infer_size':self.infer_size,'save_oof_preds':self.save_oof_preds,'save_test_preds':self.save_test_preds,
                      'device':self.device,'one_hot_max':self.one_hot_max,'custom_metric':self.custom_metric,
@@ -651,7 +656,7 @@ class Yunbase():
             #nunique=1
             self.unique_cols=[]
             for col in df.drop(self.drop_cols+self.list_cols+\
-                               [self.weight_col,self.group_col,self.target_col],axis=1,errors='ignore').columns:
+                               [self.weight_col,self.group_col,self.target_col,self.kfold_col],axis=1,errors='ignore').columns:
                 if(df[col].nunique()<2):#maybe np.nan
                     self.unique_cols.append(col)
                 #max_value_counts's count
@@ -668,7 +673,7 @@ class Yunbase():
             self.one_hot_cols=[]
             self.nunique2_cols=[]
             for col in df.drop(
-                [self.target_col,self.group_col,self.weight_col]+\
+                [self.target_col,self.group_col,self.weight_col,self.kfold_col]+\
                 self.list_cols+self.drop_cols
                 ,axis=1,errors='ignore'
             ).columns:
@@ -880,7 +885,7 @@ class Yunbase():
         if self.use_scaler:
             if mode=='train':
                 #'/' will be considered as a path.
-                self.num_cols=[col for col in df.drop([self.target_col],axis=1).columns \
+                self.num_cols=[col for col in df.drop([self.target_col,self.kfold_col],axis=1,errors='ignore').columns \
                                if ( str(df[col].dtype) not in ['object','category'] ) and ('/' not in col)]
             print("< robust scaler >")
             for col in self.num_cols:
@@ -955,11 +960,15 @@ class Yunbase():
                 y=pd.DataFrame({self.target_col:self.target})
                 y=pd.concat((self.features,y),axis=1)
                 agg_df_columns=agg_df.drop([g_col],axis=1).columns
-                aggs=[a for c in list(agg_df_columns) for a in ['nunique','count','min','max','first','last',
-                               'mean','median','sum','std','skew'] if a in c]
-                agg_df_agg=y[t_col].agg(aggs).values
                 for i in range(len(agg_df_columns)):
-                    X[agg_df_columns[i]]=X[agg_df_columns[i]].fillna(agg_df_agg[i])
+                    agg='null'
+                    for a in ['nunique','count','min','max','first','last',
+                              'mean','median','sum','std','skew']:
+                        if a in list(agg_df_columns)[i]:
+                            agg=a
+                    if agg!='null':
+                        X[agg_df_columns[i]]=X[agg_df_columns[i]].fillna(y[t_col].agg(agg))
+                
         return X 
     
     #Feature engineering that needs to be done internally in cross validation.
@@ -1165,7 +1174,7 @@ class Yunbase():
                                                          num_classes=self.num_classes,objective=self.objective,
                                                          log=self.log,use_pseudo_label=self.use_pseudo_label,
                                                          test=self.test,group_col=self.group_col,target_col=self.target_col,
-                                                         category_cols=self.category_cols,
+                                                         category_cols=self.colname_clean(copy.deepcopy(self.category_cols)),
                                                          CV_stat=self.CV_stat,
                                                          use_data_augmentation=self.use_data_augmentation,
                                                          CV_sample=self.CV_sample,device=self.device,
@@ -1502,7 +1511,7 @@ class Yunbase():
                             feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
                             feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
                             self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold{fold}_{self.target_col}_feature_importance.pkl')
-                            bestk,worstk=min(10,int(len(origin_features)*0.1+1)),min(10,int(len(origin_features)*0.1+1))
+                            bestk,worstk=min(20,int(len(origin_features)*0.1+1)),min(20,int(len(origin_features)*0.1+1))
                             print(f"top{bestk} best features is :{list(feat_import_dict.keys())[:bestk]}")
                             print(f"top{worstk} worst features is :{list(feat_import_dict.keys())[-worstk:]}")
         
@@ -1668,6 +1677,7 @@ class Yunbase():
                          exp_mode:bool=False,exp_mode_b:int=0,
                          use_CIR:bool=False,metric=None,Metric=None,
                         ):
+       
         if use_optuna:
             log=10000
         if objective=='regression':
@@ -1675,13 +1685,15 @@ class Yunbase():
         else:
             oof_preds=np.zeros((len(y),num_classes))
         for fold in tqdm(range(num_folds)):
-            train_index=kf_folds[kf_folds['fold']!=fold].index
-            valid_index=kf_folds[kf_folds['fold']==fold].index
+            
+            train_index=kf_folds[kf_folds[self.kfold_col]!=fold].index
+            valid_index=kf_folds[kf_folds[self.kfold_col]==fold].index
+            
             print(f"name:{model_name},fold:{fold}")
 
             X_train, X_valid = X.iloc[train_index].reset_index(drop=True), X.iloc[valid_index].reset_index(drop=True)
             y_train, y_valid = y.iloc[train_index].reset_index(drop=True), y.iloc[valid_index].reset_index(drop=True)
-
+            
             if CV_stat!=None:
                 X_train=CV_stat(X=X_train,y=y_train,fold=fold,repeat=repeat )
                 X_valid=CV_stat(X=X_valid,fold=fold,repeat=repeat)
@@ -1870,7 +1882,7 @@ class Yunbase():
         y=total['is_test']
         sample_weight=pd.DataFrame({"weight":np.ones(len(y))})['weight']
         kf=StratifiedKFold(n_splits=5,random_state=self.seed,shuffle=True)     
-        kf_folds=pd.DataFrame({"fold":np.zeros(len(y))})
+        kf_folds=pd.DataFrame({'fold':np.zeros(len(y))})
         for fold, (train_index, valid_index) in (enumerate(kf.split(X,y))):
             kf_folds['fold'][valid_index]=fold
 
@@ -1900,7 +1912,7 @@ class Yunbase():
         #Here we choose 0.99,other feature with high correlation can use Dimensionality reduction such as PCA.
         #if you want to delete other feature with high correlation,add into drop_cols when init.
         numerical_cols=[col for col in df.columns \
-                        if (col not in [self.target_col,self.group_col,self.weight_col]) \
+                        if (col not in [self.target_col,self.group_col,self.weight_col,self.kfold_col]) \
                         and str(df[col].dtype) not in ['object','category']]
         corr_matrix=df[numerical_cols].corr().values
         drop_cols=[]
@@ -1955,6 +1967,9 @@ class Yunbase():
         self.PrintColor("fit......",color=Fore.GREEN)
         self.PrintColor("load train data")
         self.train=self.load_data(path_or_file=train_path_or_file,mode='train')
+        if self.kfold_col in self.train.columns:
+            if sorted(self.train[self.kfold_col].unique())!=list(np.arange(self.num_folds)):
+                raise ValueError(f"values in {self.kfold_col} must be one of [0,1,……,{self.num_folds-1}]")   
         #process date_cols
         for date_col in self.date_cols:
             self.train[date_col]=pd.to_datetime(self.train[date_col])
@@ -2026,21 +2041,24 @@ class Yunbase():
                         }
             #find new params then use optuna
             if self.use_optuna_find_params:
-                #choose cross validation
-                if self.objective!='regression':
-                    if self.group_col!=None:#group
-                        kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
-                    else:
-                        kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
-                else:#regression
-                    if self.group_col!=None:#group
-                        kf=GroupKFold(n_splits=self.num_folds)
-                    else:
-                        kf=KFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
-                kf_folds=pd.DataFrame({"fold":np.zeros(len(y))})
-                for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
-                    kf_folds['fold'][valid_index]=fold
-                lgb_params=self.optuna_lgb(X=X,y=y,group=group,kf_folds=kf_folds,metric=metric)
+                if self.kfold_col not in X.columns:
+                    #choose cross validation
+                    if self.objective!='regression':
+                        if self.group_col!=None:#group
+                            kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
+                        else:
+                            kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
+                    else:#regression
+                        if self.group_col!=None:#group
+                            kf=GroupKFold(n_splits=self.num_folds)
+                        else:
+                            kf=KFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
+                    kf_folds=pd.DataFrame({self.kfold_col:np.zeros(len(y))})
+                    for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
+                        kf_folds[self.kfold_col][valid_index]=fold
+                else:
+                    kf_folds=pd.DataFrame({self.kfold_col:X[self.kfold_col].values})
+                lgb_params=self.optuna_lgb(X=X.drop([self.kfold_col],axis=1,errors='ignore'),y=y,group=group,kf_folds=kf_folds,metric=metric)
              
             #catboost's metric
             # Valid options are:  'CrossEntropy', 'CtrFactor', 'Focal', 'RMSE', 'LogCosh', 
@@ -2116,37 +2134,40 @@ class Yunbase():
                             ]
 
         for repeat in range(self.n_repeats):
-            #choose cross validation
-            if self.objective!='regression':
-                if self.group_col!=None:#group
-                    kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
-                else:
-                    kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
-            else:#regression
-                if self.group_col!=None:#group
-                    kf=GroupKFold(n_splits=self.num_folds)
-                else:
-                    kf=KFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
-            kf_folds=pd.DataFrame({"fold":np.zeros(len(y))})
-            #use groupkfoldshuffle
-            if (self.group_col!=None) and self.objective=='regression':
-                unique_group=sorted(group.unique())
-                random_group=unique_group.copy()
-                np.random.shuffle(random_group)
-                random_map={k:v for k,v in zip(unique_group,random_group)}
-                group=group.apply(lambda x:random_map[x])
-                group=group.sort_values()
-                X=X.loc[list(group.index)]
-                y=y.loc[list(group.index)]
-                del unique_group,random_group,random_map
-                gc.collect()
-                
-            for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
-                kf_folds['fold'][valid_index]=fold
-            #sort_index
-            if (self.group_col!=None):
-                X,y=X.sort_index(),y.sort_index()
-                group,kf_folds=group.sort_index(),kf_folds.sort_index()
+            if self.kfold_col not in X.columns:
+                #choose cross validation
+                if self.objective!='regression':
+                    if self.group_col!=None:#group
+                        kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
+                    else:
+                        kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
+                else:#regression
+                    if self.group_col!=None:#group
+                        kf=GroupKFold(n_splits=self.num_folds)
+                    else:
+                        kf=KFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
+                kf_folds=pd.DataFrame({self.kfold_col:np.zeros(len(y))})
+                #use groupkfoldshuffle
+                if (self.group_col!=None) and self.objective=='regression':
+                    unique_group=sorted(group.unique())
+                    random_group=unique_group.copy()
+                    np.random.shuffle(random_group)
+                    random_map={k:v for k,v in zip(unique_group,random_group)}
+                    group=group.apply(lambda x:random_map[x])
+                    group=group.sort_values()
+                    X=X.loc[list(group.index)]
+                    y=y.loc[list(group.index)]
+                    del unique_group,random_group,random_map
+                    gc.collect()
+                    
+                for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
+                    kf_folds[self.kfold_col][valid_index]=fold
+                #sort_index
+                if (self.group_col!=None):
+                    X,y=X.sort_index(),y.sort_index()
+                    group,kf_folds=group.sort_index(),kf_folds.sort_index()
+            else:#custom_kfold
+                kf_folds=pd.DataFrame({self.kfold_col:X[self.kfold_col].values})
             
             #check params and update
             for i in range(len(self.models)):
@@ -2160,14 +2181,14 @@ class Yunbase():
                 
             self.PrintColor("model training")
             for (model,model_name) in self.models:
-                oof_preds,metric_score=self.cross_validation(X=X,y=y,group=group,repeat=repeat,kf_folds=kf_folds,
+                oof_preds,metric_score=self.cross_validation(X=X.drop([self.kfold_col],axis=1,errors='ignore'),y=y,group=group,repeat=repeat,kf_folds=kf_folds,
                                                              model=copy.deepcopy(model),model_name=model_name,
                                                              sample_weight=self.sample_weight,use_optuna=False,
                                                              num_folds=self.num_folds,CV_FE=self.CV_FE,
                                                              num_classes=self.num_classes,objective=self.objective,
                                                              log=self.log,use_pseudo_label=self.use_pseudo_label,
                                                              test=self.test,group_col=self.group_col,target_col=self.target_col,
-                                                             category_cols=self.category_cols,
+                                                             category_cols=self.colname_clean(copy.deepcopy(self.category_cols)),
                                                              CV_stat=self.CV_stat,
                                                              use_data_augmentation=self.use_data_augmentation,
                                                              CV_sample=self.CV_sample,device=self.device,
@@ -2231,14 +2252,15 @@ class Yunbase():
 
     #regression/classification
     def predict_batch(self,model,test_X):
+        category_cols=self.colname_clean(copy.deepcopy(self.category_cols))
         test_preds=np.zeros((len(test_X)))
         if 'catboost' in str(type(model)):#catboost
-            test_X[self.category_cols]=test_X[self.category_cols].astype('string')
+            test_X[category_cols]=test_X[category_cols].astype('string')
         else:
-            test_X[self.category_cols]=test_X[self.category_cols].astype('category')
+            test_X[category_cols]=test_X[category_cols].astype('category')
         for idx in range(0,len(test_X),self.infer_size):
             if 'tabnet' in str(type(model)):
-                for c in self.category_cols:
+                for c in category_cols:
                    test_X[c]=test_X[c].apply(lambda x:int(x)).astype(np.int32)     
                 test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
             else:   
@@ -2248,12 +2270,12 @@ class Yunbase():
             test_aug_X=self.pca_augmentation(X=test_X)
             test_aug_preds=np.zeros((len(test_aug_X)))
             if 'catboost' in str(type(model)):#catboost
-                test_aug_X[self.category_cols]=test_aug_X[self.category_cols].astype('string')
+                test_aug_X[category_cols]=test_aug_X[category_cols].astype('string')
             else:
-                test_aug_X[self.category_cols]=test_aug_X[self.category_cols].astype('category')
+                test_aug_X[category_cols]=test_aug_X[category_cols].astype('category')
             for idx in range(0,len(test_aug_X),self.infer_size):
                 if 'tabnet' in str(type(model)):
-                    for c in self.category_cols:
+                    for c in category_cols:
                        test_aug_X[c]=test_aug_X[c].apply(lambda x:int(x)).astype(np.int32)     
                     test_aug_preds[idx:idx+self.infer_size]=model.predict(test_aug_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
                 else:   
@@ -2264,14 +2286,15 @@ class Yunbase():
 
     #classification
     def predict_proba_batch(self,model,test_X):
+        category_cols=self.colname_clean(copy.deepcopy(self.category_cols))
         test_preds=np.zeros((len(test_X),self.num_classes))
         if 'catboost' in str(type(model)):#catboost
-            test_X[self.category_cols]=test_X[self.category_cols].astype('string')
+            test_X[category_cols]=test_X[category_cols].astype('string')
         else:
-            test_X[self.category_cols]=test_X[self.category_cols].astype('category')
+            test_X[category_cols]=test_X[category_cols].astype('category')
         for idx in range(0,len(test_X),self.infer_size):
             if 'tabnet' in str(type(model)):
-                for c in self.category_cols:
+                for c in category_cols:
                     test_X[c]=test_X[c].apply(lambda x:int(x)).astype(np.int32)     
                 test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size].to_numpy())
             else:
@@ -2281,12 +2304,12 @@ class Yunbase():
             test_aug_X=self.pca_augmentation(X=test_X)
             test_aug_preds=np.zeros((len(test_aug_X),self.num_classes))
             if 'catboost' in str(type(model)):#catboost
-                test_aug_X[self.category_cols]=test_aug_X[self.category_cols].astype('string')
+                test_aug_X[category_cols]=test_aug_X[category_cols].astype('string')
             else:
-                test_aug_X[self.category_cols]=test_aug_X[self.category_cols].astype('category')
+                test_aug_X[category_cols]=test_aug_X[category_cols].astype('category')
             for idx in range(0,len(test_aug_X),self.infer_size):
                 if 'tabnet' in str(type(model)):
-                    for c in self.category_cols:
+                    for c in category_cols:
                        test_aug_X[c]=test_aug_X[c].apply(lambda x:int(x)).astype(np.int32)     
                     test_aug_preds[idx:idx+self.infer_size]=model.predict_proba(test_aug_X[idx:idx+self.infer_size].to_numpy())
                 else:   
