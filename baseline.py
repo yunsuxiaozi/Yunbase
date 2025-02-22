@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/02/21
+@update_time:2025/02/22
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -79,6 +79,7 @@ class Yunbase():
                       save_test_preds:bool=True,
                       device:str='cpu',
                       one_hot_max:int=50,
+                      one_hot_cols=None,
                       custom_metric=None,
                       use_optuna_find_params:int=0,
                       optuna_direction=None,
@@ -139,7 +140,10 @@ class Yunbase():
                                the predicted result is the category.If you need to save the probability of the test_data,
                                you can save test_preds.
         device                :GBDT can training on GPU,you can set this parameter like NN.
-        one_hot_max           :If the nunique of a column is less than a certain value, perform one hot encoder.
+        one_hot_max/one_hot_cols
+                              :Perform onehotencoder on features, one considering the numerical value 
+                               of nunique and the other customizing features.
+        
         custom_metric         :your custom_metric,when objective is multi_class,y_pred in custom(y_true,y_pred) is probability.            
         use_optuna_find_params:count of use optuna find best params,0 is not use optuna to find params.
                                Currently only LGBM is supported.
@@ -252,6 +256,7 @@ class Yunbase():
         elif (self.objective=='multi_class') and (self.num_classes==None):
             raise ValueError("num_classes must be a number(int).")
         self.one_hot_max=one_hot_max
+        self.one_hot_cols=one_hot_cols
         
         self.use_optuna_find_params=use_optuna_find_params
         self.optuna_direction=optuna_direction
@@ -354,7 +359,8 @@ class Yunbase():
                      'kfold_col':self.kfold_col,'drop_cols':self.drop_cols,'seed':self.seed,'objective':self.objective,
                      'metric':self.metric,'nan_margin':self.nan_margin,'num_classes':self.num_classes,
                      'infer_size':self.infer_size,'save_oof_preds':self.save_oof_preds,'save_test_preds':self.save_test_preds,
-                     'device':self.device,'one_hot_max':self.one_hot_max,'custom_metric':self.custom_metric,
+                     'device':self.device,'one_hot_max':self.one_hot_max,'one_hot_cols':self.one_hot_cols,
+                     'custom_metric':self.custom_metric,
                      'use_optuna_find_params':self.use_optuna_find_params,'optuna_direction':self.optuna_direction,
                      'early_stop':self.early_stop,'use_pseudo_label':self.use_pseudo_label,
                      'use_high_corr_feat':self.use_high_corr_feat,'cross_cols':self.cross_cols,
@@ -669,37 +675,44 @@ class Yunbase():
             
             #object dtype
             self.object_cols=[col for col in df.drop(self.drop_cols+self.category_cols,axis=1,errors='ignore').columns if (df[col].dtype==object) and (col not in [self.group_col,self.target_col])]
-            #one_hot_cols
-            self.one_hot_cols=[]
-            self.nunique2_cols=[]
-            for col in df.drop(
-                [self.target_col,self.group_col,self.weight_col,self.kfold_col]+\
-                self.list_cols+self.drop_cols
-                ,axis=1,errors='ignore'
-            ).columns:
-                if (df[col].dtype==object) and not (
-                    #such as sin_month,month have already been onehot.
-                    col.startswith('sin') or col.startswith('cos') or
-                    #AGGREGATION don't use onehot.
-                    col.endswith('_nunique') or col.endswith('_count') or
-                    col.endswith('_min') or col.endswith('_max') or 
-                    col.endswith('_first') or col.endswith('_last') or
-                    col.endswith('_mean') or col.endswith('_median') or 
-                    col.endswith('_sum') or col.endswith('_std') or col.endswith('_skew') or 
-                    #q0:0.05,q1:0.25,q2:0.5,q3:0.75,q4:0.95
-                    col.endswith('_kurtosis') or col.endswith('_q0') or col.endswith('_q1') or
-                    col.endswith('_q2') or col.endswith('_q3') or col.endswith('_q4')
-                    ):
-                    if (df[col].nunique()<self.one_hot_max) and (df[col].nunique()>2):
-                        self.one_hot_cols.append([col,list(df[col].value_counts().to_dict().keys())]) 
-                    elif (self.one_hot_max>=2) and (df[col].nunique()==2):
-                        self.nunique2_cols.append([col,list(df[col].unique())[0]])
+            ##### one_hot_encoder
+            if self.one_hot_cols==None:
+                self.nunique3_cols=[]
+                self.nunique2_cols=[]
+                for col in df.drop(
+                    [self.target_col,self.group_col,self.weight_col,self.kfold_col]+\
+                    self.list_cols+self.drop_cols
+                    ,axis=1,errors='ignore'
+                ).columns:
+                    if (df[col].dtype==object) and not (
+                        #such as sin_month,month have already been onehot.
+                        col.startswith('sin') or col.startswith('cos') or
+                        #AGGREGATION don't use onehot.
+                        col.endswith('_nunique') or col.endswith('_count') or
+                        col.endswith('_min') or col.endswith('_max') or 
+                        col.endswith('_first') or col.endswith('_last') or
+                        col.endswith('_mean') or col.endswith('_median') or 
+                        col.endswith('_sum') or col.endswith('_std') or col.endswith('_skew') or 
+                        #q0:0.05,q1:0.25,q2:0.5,q3:0.75,q4:0.95
+                        col.endswith('_kurtosis') or col.endswith('_q0') or col.endswith('_q1') or
+                        col.endswith('_q2') or col.endswith('_q3') or col.endswith('_q4')
+                        ):
+                        if (df[col].nunique()<self.one_hot_max) and (df[col].nunique()>2):
+                            self.nunique3_cols.append([col,list(df[col].value_counts().to_dict().keys())]) 
+                        elif (self.one_hot_max>=2) and (df[col].nunique()==2):
+                            self.nunique2_cols.append([col,list(df[col].unique())[0]])
+            else:#self.one_hot_cols=[col1,col2]
+                self.nunique2_cols=[[c,list(df[c].unique())[0]] \
+                                    for c in self.one_hot_cols if df[c].nunique()==2]
+                self.nunique3_cols=[ [c,list(df[c].value_counts().to_dict().keys())]  \
+                                   for c in self.one_hot_cols if c not in self.nunique2_cols and df[c].nunique()>2]
+                self.one_hot_max=3
         
         df=pl.from_pandas(df)
         if self.one_hot_max>1:
             print("< one hot encoder >")          
-            for i in range(len(self.one_hot_cols)):
-                col,nunique=self.one_hot_cols[i]
+            for i in range(len(self.nunique3_cols)):
+                col,nunique=self.nunique3_cols[i]
                 for u in nunique:
                     df=df.with_columns((pl.col(col)==u).cast(pl.Int8).alias(f"{col}_{u}"))
                 #one_hot_value_count
@@ -964,7 +977,8 @@ class Yunbase():
                     agg='null'
                     for a in ['nunique','count','min','max','first','last',
                               'mean','median','sum','std','skew']:
-                        if a in list(agg_df_columns)[i]:
+                        #maybe feature has agg such as 'last_status'.
+                        if a==list(agg_df_columns)[i][-len(a):]:
                             agg=a
                     if agg!='null':
                         X[agg_df_columns[i]]=X[agg_df_columns[i]].fillna(y[t_col].agg(agg))
@@ -1865,11 +1879,21 @@ class Yunbase():
 
     #https://www.kaggle.com/code/carlmcbrideellis/what-is-adversarial-validation
     #This function does not perform any feature engineering.
-    def adversarial_validation(self,train:pd.DataFrame,test:pd.DataFrame,
+    def adversarial_validation(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
+                               test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',
                                     target_col:str='target'):
-        train,test=train.copy(),test.copy()
+        train=self.load_data(train_path_or_file,mode='adv')
+        test=self.load_data(test_path_or_file,mode='adv')
+
+        if target_col=='' or type(target_col)==type(None):
+            raise ValueError(f"{target_col} can't be None.")
+        if target_col not in train.columns:
+            raise ValueError(f"{target_col} must in train.columns.")
+        if sorted(list(train.drop(target_col,axis=1).columns))!=sorted(list(test.columns)):
+            raise ValueError(f"train and test must have same features.")
+            
         #drop object cols
-        object_cols=[col for col in train.columns if col!=target_col and train[col].dtype==object]
+        object_cols=[c for c in train.columns if c!=target_col and train[c].dtype==object]
         train.drop(object_cols,axis=1,inplace=True)
         test.drop(object_cols,axis=1,inplace=True)
 
@@ -1887,7 +1911,8 @@ class Yunbase():
             kf_folds['fold'][valid_index]=fold
 
         temp_metric,temp_objective,temp_num_classes=self.metric,self.objective,self.num_classes
-        self.metric,self.objective,self.num_classes='auc','binary',2
+        temp_trained_models=copy.deepcopy(self.trained_models)
+        self.metric,self.objective,self.num_classes,self.trained_models='auc','binary',2,[]
         
         oof_preds,metric_score=self.cross_validation(X=X,y=y,group=None,kf_folds=kf_folds,
                          model=LGBMClassifier(n_estimators=256,metric='auc',
@@ -1905,7 +1930,7 @@ class Yunbase():
         self.PrintColor(f"{self.metric}------------------------------>{metric_score}",color = Fore.RED)
 
         self.metric,self.objective,self.num_classes=temp_metric,temp_objective,temp_num_classes
-        self.trained_models=[]
+        self.trained_models=copy.deepcopy(temp_trained_models)
     
     def drop_high_correlation_feats(self,df:pd.DataFrame)->None:
         #target_col and group_col is for model training,don't delete.object feature is string.
@@ -2381,8 +2406,7 @@ class Yunbase():
                 self.test[self.target_col]=test_preds
                 self.trained_models=[]
                 self.trained_CIR=[]
-                self.fit(self.train_path_or_file,self.category_cols,
-                     self.date_cols)
+                self.fit(self.train_path_or_file,self.category_cols,self.date_cols)
                 #calculate oof score if save_oof_preds
                 self.cal_final_score(weights)
                 
