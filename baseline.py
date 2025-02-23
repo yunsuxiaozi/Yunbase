@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/02/22
+@update_time:2025/02/23
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -1434,6 +1434,10 @@ class Yunbase():
                 y_train=train_fold[self.target_col]
                 X_valid=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
                 y_valid=valid_fold[self.target_col]
+
+                #for CV_stat(self,)
+                self.features,self.target=X_train,y_train.values
+                
                 train_weight,valid_weight=train_fold[self.weight_col],valid_fold[self.weight_col]
                 del train_fold,valid_fold
                 gc.collect()
@@ -1570,6 +1574,8 @@ class Yunbase():
         train_weight=train[self.weight_col]
         X_train=train.drop([self.target_col,self.date_col,self.weight_col],axis=1)
         y_train=train[self.target_col]
+        #for CV_stat(self,)
+        self.features,self.target=X_train,y_train.values
         del train
         gc.collect()
         
