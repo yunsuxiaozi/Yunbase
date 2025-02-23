@@ -38,52 +38,54 @@ from Yunbase.baseline import Yunbase
 All the parameters are below, and you can flexibly choose parameters according to the task.
 
 ```python
-yunbase=Yunbase(  num_folds:int=5,
-                  n_repeats:int=1,
-                  models:list[tuple]=[],
-                  FE=None,
-                  CV_sample=None,
-                  group_col=None,
-                  target_col:str='target',
-                  weight_col:str='weight',
-                  drop_cols:list[str]=[],
-                  seed:int=2024,
-                  objective:str='regression',
-                  metric:str='mse',
-                  nan_margin:float=0.95,
-                  num_classes=None,
-                  infer_size:int=10000,
-                  save_oof_preds:bool=True,
-                  save_test_preds:bool=True,
-                  device:str='cpu',
-                  one_hot_max:int=50,
-                  custom_metric=None,
-                  use_optuna_find_params:int=0,
-                  optuna_direction=None,
-                  early_stop:int=100,
-                  use_pseudo_label:bool=False,
-                  use_high_corr_feat:bool=True,
-                  cross_cols:list[str]=[],
-                  labelencoder_cols:list[str]=[],
-                  list_stat:list[tuple]=[],
-                  word2vec_models:list[tuple]=[],
-                  text_cols:list[str]=[],
-                  plot_feature_importance:bool=False,
-                  log:int=100,
-                  exp_mode:bool=False,
-                  use_reduce_memory:bool=False,
-                  use_data_augmentation:bool=False,
-                  use_oof_as_feature:bool=False,
-                  use_CIR:bool=False,
-                  use_median_as_pred:bool=False,
-                  use_scaler:bool=False,
-                  use_TTA:bool=False,
-                  use_eval_metric:bool=True,
-                  feats_stat:list[tuple]=[],
-                  target_stat:list[tuple]=[],
-                  use_spellchecker:bool=False,
-                  AGGREGATIONS:list=['nunique','count','min','max','first',
-                                     'last','mean','median','sum','std','skew',kurtosis],
+yunbase=Yunbase(      num_folds:int=5,
+                      n_repeats:int=1,
+                      models:list[tuple]=[],
+                      FE=None,
+                      CV_sample=None,
+                      group_col=None,
+                      target_col:str='target',
+                      weight_col:str='weight',
+                      kfold_col:str='fold',
+                      drop_cols:list[str]=[],
+                      seed:int=2025,
+                      objective:str='regression',
+                      metric:str='mse',
+                      nan_margin:float=0.95,
+                      num_classes=None,
+                      infer_size:int=10000,
+                      save_oof_preds:bool=True,
+                      save_test_preds:bool=True,
+                      device:str='cpu',
+                      one_hot_max:int=50,
+                      one_hot_cols=None,
+                      custom_metric=None,
+                      use_optuna_find_params:int=0,
+                      optuna_direction=None,
+                      early_stop:int=100,
+                      use_pseudo_label:bool=False,
+                      use_high_corr_feat:bool=True,
+                      cross_cols:list[str]=[],
+                      labelencoder_cols:list[str]=[],
+                      list_stat:list[tuple]=[],
+                      word2vec_models:list[tuple]=[],
+                      text_cols:list[str]=[],
+                      plot_feature_importance:bool=False,
+                      log:int=100,
+                      exp_mode:bool=False,
+                      use_reduce_memory:bool=False,
+                      use_data_augmentation:bool=False,
+                      use_oof_as_feature:bool=False,
+                      use_CIR:bool=False,
+                      use_median_as_pred:bool=False,
+                      use_scaler:bool=False,
+                      use_TTA:bool=False,
+                      use_eval_metric:bool=True,
+                      feats_stat:list[tuple]=[],
+                      target_stat:list[tuple]=[],
+                      use_spellchecker:bool=False,
+                      AGGREGATIONS:list=['nunique','count','min','max','first',
+                                           'last', 'mean','median','sum','std','skew',kurtosis],
     )
 ```
 
@@ -136,7 +138,7 @@ yunbase=Yunbase(  num_folds:int=5,
 
 ​      In purgedCV(time series CV), in order to make the training set and test set closer, without a validation set, this function will become as follows:
 
-```
+```python
 def CV_sample(X_train,y_train,sample_weight_train):
     #your code
     return X_train,y_train,sample_weight_train
@@ -150,6 +152,15 @@ def CV_sample(X_train,y_train,sample_weight_train):
 - target_col:<b>str</b>.the column that you want to predict.
 
 - weight_col:<b>str</b>.You can set the weight of each sample during model training. If not defined by the user, 1 will be used by default to train each sample.
+
+- kfold_col:<b>str</b>.Allow users to customize kfold.For example,
+
+     ```python
+     num_folds=5
+     train['fold']=train.index%num_folds
+     ```
+
+     
 
 - drop_cols:<b>list</b>.The column to be deleted after all feature engineering is completed.
 
@@ -172,6 +183,8 @@ def CV_sample(X_train,y_train,sample_weight_train):
 - device:<b>str</b>.GBDT can training on GPU,you can set this parameter 'gpu' when you want to training on GPU.
 
 - one_hot_max:<b>int</b>.If the nunique of a column is less than a certain value, perform one hot encoder.
+
+- one_hot_cols:<b>list[str]</b>.Customize which columns to use onehotencoder.
 
 - custom_metric:<b>function</b>.you can define your  own custom_metric.
 
@@ -273,6 +286,7 @@ yunbase.fit(train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
 
 ```python
 test_preds=yunbase.predict(test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=np.zeros(0))
+test_preds=yunbase.predict_proba(test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=np.zeros(0))
 ```
 
 - weights:This is setting the weights for model ensemble. For example, if you specify lgb, xgb, and cat, you can set weights to [3,4,3].
@@ -288,7 +302,7 @@ yunbase.submit(submission_path_or_file='submission.csv',test_preds=np.ones(3),sa
 9.ensemble
 
 ```python
-yunbase.ensemble(solution_paths_or_files:list[str]=[],weights=None)
+yunbase.ensemble(solution_paths_or_files:list[str]=[],id_col:str='id',target_col:str='',weights=None)
 ```
 
 - For example:
@@ -372,15 +386,25 @@ The code has now completed a rough framework and will continue to be improved by
 
 6.Make the code more beautiful, concise, and easy to understand.
 
+7.Add statements with abnormal error messages.
+
 Waiting for updates.
 
 Kaggle:https://www.kaggle.com/yunsuxiaozi
 
-<img src="star-history-2024128.png" alt="yunbase title image" style="zoom:100%;" />
+<img src="star-history-2025223.png" alt="yunbase title image" style="zoom:100%;" />
+
+## Some interesting dataset recommendations:
+
+#### 1.Competitions with significant differences in data distribution between training and testing sets: suitable for learning adversarial validation: <a href="https://www.kaggle.com/competitions/should-i-eat-this-mushroom-tfug-delhi/overview">Should I eat this mushroom? TFUG Delhi</a>
+
+#### 2.Treat regression tasks as classification tasks:<a href="https://www.kaggle.com/competitions/playground-series-s3e25/overview">Regression with a Mohs Hardness Dataset</a>
+
+#### 3.Treat classification tasks as regression tasks:<a href="https://www.kaggle.com/competitions/child-mind-institute-problematic-internet-use/overview">Child Mind Institute — Problematic Internet Use</a>
+
+#### 4.A dataset with almost noise and only weak signals can be used to learn Target Encoder.<a href="https://www.kaggle.com/competitions/playground-series-s5e2/overview">Backpack Prediction Challenge</a>
 
 
 
-
-
- update time:2025/01/06(baseline.py and README may not synchronize updates)
+Due to the large amount of content in the README, there may still be some errors even after updating,baseline.py and README may not synchronize updates.update time:2025/02/23
 
