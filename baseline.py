@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/02/23
+@update_time:2025/03/01
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -29,6 +29,7 @@ import optuna#automatic hyperparameter optimization framework
 import ast#parse Python list strings  transform '[a,b,c]' to [a,b,c]
 import copy#copy object
 import gc#rubbish collection
+from typing import Literal#The parameters of a function can only have fixed values.
 import dill#serialize and deserialize objects (such as saving and loading tree models)
 from colorama import Fore, Style #print colorful text
 import os#interact with operation system
@@ -70,7 +71,7 @@ class Yunbase():
                       kfold_col:str='fold',
                       drop_cols:list[str]=[],
                       seed:int=2025,
-                      objective:str='regression',
+                      objective:Literal['binary','multi_class','regression']='regression',
                       metric:str='mse',
                       nan_margin:float=0.95,
                       num_classes=None,
@@ -1117,7 +1118,7 @@ class Yunbase():
             elif self.metric=='r2':
                 return 1-np.sum ((y_true-y_pred)**2)/np.sum ((y_true-np.mean(y_true))**2)
             elif self.metric=='smape':
-                return 200*np.mean(np.abs(y_true-y_pred) / (  np.abs(y_true)+np.abs(y_pred)+self.eps  ) )
+                return 200*np.mean(np.abs(y_true-y_pred) / ( np.abs(y_true)+np.abs(y_pred)+self.eps ) )
         else:
             if self.metric=='accuracy':
                 #lgb_eval_metric or Metric(target,oof_preds)?
@@ -1233,9 +1234,15 @@ class Yunbase():
             self.train_path_or_file=path_or_file
         if type(path_or_file)==str:#path
             if path_or_file[-4:]=='.csv':
-                file=pl.read_csv(path_or_file)
+                try:
+                    file=pl.read_csv(path_or_file)
+                except:
+                    raise ValueError(f"{path_or_file} doesn't exist.Please check your path.")
             elif path_or_file[-8:]=='.parquet':
-                file=pl.read_parquet(path_or_file)
+                try:
+                    file=pl.read_parquet(path_or_file)
+                except:
+                    raise ValueError(f"{path_or_file} doesn't exist.Please check your path.")
             try:#if load csv or parquet file
                 file=file.to_pandas()
             except:
@@ -1246,10 +1253,12 @@ class Yunbase():
             if isinstance(file, pl.DataFrame):
                 file=file.to_pandas()
             if not isinstance(file, pd.DataFrame):
-                raise ValueError(f"{mode}_path_or_file is not pd.DataFrame.")
+                raise ValueError(f"{mode} path_or_file is not pd.DataFrame.")
         
         if mode=='train':
             train=file.copy()
+            if self.target_col not in list(train.columns):
+                raise ValueError(f"{self.target_col} must in columns.")
             #if target_col is nan,then drop these data.
             train=train[~train[self.target_col].isna()]
             if self.weight_col not in list(train.columns):
@@ -1262,11 +1271,11 @@ class Yunbase():
                 train[self.target_col]=train[self.target_col].astype(np.float32)
             return train
         elif mode=='test':
-            test=file.copy()
-            for col in test.columns:
-                test[col]=test[col].astype(self.col2dtype.get(col,object))
+            test=file.drop([self.target_col],axis=1,errors='ignore').copy()
+            for c in test.columns:#c:column
+                test[c]=test[c].astype(self.col2dtype.get(c,object))
             return test
-        else:#submission.csv
+        else:#submission.csv or you just want to load data.
             return file
 
     #https://www.kaggle.com/code/yunsuxiaozi/posv-yunbase-purgedcv-vs-cv
@@ -1345,7 +1354,7 @@ class Yunbase():
         self.category_cols=category_cols
         self.target_dtype=self.train[self.target_col].dtype
         if self.objective!='regression':#check target
-            unique_target=list(self.train[self.target_col].value_counts().to_dict().keys())
+            unique_target=sorted(list(self.train[self.target_col].value_counts().to_dict().keys()))
             if unique_target!=list(np.arange(len(unique_target))):
                 raise ValueError(f"purged CV can only support target from 0 to {len(unique_target)-1}")
         print("< preprocess date_col >")
@@ -2273,10 +2282,10 @@ class Yunbase():
         #calculate oof score if save_oof_preds
         if self.save_oof_preds:
             for repeat in range(self.n_repeats):
-                oof_preds=np.zeros_like(np.load(self.model_save_path+f"{self.models[0//self.num_folds][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy"))
-                for i in range(0,len(weights)//self.n_repeats,self.num_folds):
-                    oof_pred=np.load(self.model_save_path+f"{self.models[i//self.num_folds][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy")
-                    oof_preds+=weights[i+repeat*self.num_folds]*oof_pred
+                oof_preds=np.zeros_like(np.load(self.model_save_path+f"{self.models[0][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy"))
+                for i in range(len(weights)//self.n_repeats):
+                    oof_pred=np.load(self.model_save_path+f"{self.models[i][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy")
+                    oof_preds+=weights[i]*oof_pred
                 oof_preds=oof_preds/len(self.models)
                 metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
                 print(f"final_repeat{repeat}_{metric}:{self.Metric(self.target,oof_preds)}")
@@ -2349,7 +2358,8 @@ class Yunbase():
         
         return test_preds
     
-    def predict(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=np.zeros(0))->np.array:
+    def predict(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',
+                     weights=np.zeros(0))->np.array:
         if self.objective=='regression':
             self.PrintColor("predict......",color=Fore.GREEN)
             #weights:[1]*len(self.models)
@@ -2360,9 +2370,10 @@ class Yunbase():
             if len(weights)!=n:
                 raise ValueError(f"length of weights must be {len(self.models)}.")
             self.PrintColor("weight normalization")
-            weights=np.array([w for w in weights for f in range(self.num_folds) for r in range(self.n_repeats)],dtype=np.float32)
+            weights=np.array([w for r in range(self.n_repeats) for w in weights],dtype=np.float32)
             #normalization
-            weights=weights*(self.num_folds*self.n_repeats*n)/np.sum(weights)
+            weights=weights*(len(weights))/np.sum(weights)
+            print(f"weights:{weights}")
     
             #calculate oof score if save_oof_preds
             self.cal_final_score(weights)
@@ -2447,7 +2458,8 @@ class Yunbase():
             else:
                 return np.argmax(test_preds,axis=1)          
 
-    def predict_proba(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',weights=np.zeros(0))->np.array:
+    def predict_proba(self,test_path_or_file:str|pd.DataFrame|pl.DataFrame='test.csv',
+                      weights=np.zeros(0))->np.array:
         self.PrintColor("predict......",color=Fore.GREEN)
         #weights:[1]*len(self.models)
         n=len(self.models)
@@ -2457,9 +2469,10 @@ class Yunbase():
         if len(weights)!=n:
             raise ValueError(f"length of weights must be {len(self.models)}.")
         self.PrintColor("weight normalization")
-        weights=np.array([w for w in weights for f in range(self.num_folds) for r in range(self.n_repeats)],dtype=np.float32)
+        weights=np.array([w for r in range(self.n_repeats) for w in weights],dtype=np.float32)
         #normalization
-        weights=weights*(self.num_folds*self.n_repeats*n)/np.sum(weights)
+        weights=weights*len(weights)/np.sum(weights)
+        print(f"weights:{weights}")
 
         #calculate oof score if save_oof_preds
         self.cal_final_score(weights)
