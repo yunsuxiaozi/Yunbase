@@ -2,6 +2,7 @@
 polars
 pandas
 numpy
+swifter
 tqdm
 scikit-learn
 lightgbm
