@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/03/05
+@update_time:2025/03/13
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -627,8 +627,13 @@ class Yunbase():
     def base_FE(self,df:pd.DataFrame,mode:str='train',drop_cols:list[str]=[])->pd.DataFrame:
         if self.FE!=None:
             #use your custom metric first
-            df=self.FE(df)
-
+            try:#pandas FE
+                df=self.FE(df)
+            except:#polars FE
+                df=pl.from_pandas(df)
+                df=self.FE(df)
+                df=df.to_pandas()
+                
         #clean text
         for pt_col in tqdm(self.param_text):
             self.PrintColor(f"-> for column {pt_col} text clean",color=Fore.YELLOW)
@@ -739,7 +744,7 @@ class Yunbase():
             #preprocessing
             df[col]=df[col].swifter.apply(lambda x:str(x).lower())
             df=self.label_encoder(df,label_encoder_cols=[col],fold=self.num_folds)
-            df[col]=df[col].astype('category')
+            df[col]=df[col].astype(str).astype('category')
         
         if len(self.list_stat):
             print("< list column's feature >")
@@ -938,14 +943,23 @@ class Yunbase():
             df[col] = df[col].swifter.apply(lambda x:le.get(x,0)) 
         return df
 
+    def get_agg2pl(self,t_col):
+        #polars AGGREGATIONS
+        return  {'nunique':pl.col(t_col).n_unique(),'count':pl.col(t_col).count(),
+                 'min':pl.col(t_col).min(),'max':pl.col(t_col).max(),
+                 'first':pl.col(t_col).first(),'last':pl.col(t_col).last(),
+                'mean': pl.col(t_col).mean(),'sum':pl.col(t_col).sum(),"std": pl.col(t_col).std(),
+                'median':pl.col(t_col).median(),'skew':pl.col(t_col).skew()  }
+
     #reference: https://www.kaggle.com/code/cdeotte/first-place-single-model-cv-1-016-lb-1-016   In[6]
     def CV_stat(self,X,y=None,repeat:int=0,fold:int=0):
+        X=pl.from_pandas(X)
         if len(self.target_stat):
             if type(y)==type(None):#valid set or test set(transform)
                 TE=self.trained_TE[f'TE_repeat{repeat}_fold{fold}.model']
             else:#train set(fit and transform)
-                y=pd.DataFrame({self.target_col:y.values})
-                df=pd.concat((X,y),axis=1)
+                y=pl.DataFrame({self.target_col:y.values})
+                df=pl.concat((X,y),how="horizontal")
                 #repeat i fold j's TE  cat_col2value 
                 TE={}
                 for (g_col,t_col,agg) in self.target_stat:
@@ -954,15 +968,25 @@ class Yunbase():
                         t_col=self.colname_clean([t_col])[0]
                         
                     #deal with value_counts()<10 
-                    df_copy=df[[g_col,t_col]].copy()
-                    gcol2counts=df_copy[g_col].value_counts().to_dict()
+                    df_copy=copy.deepcopy(df[[g_col,t_col]])
+                    gcol2counts=df_copy[g_col].to_pandas().value_counts().to_dict()
                     GCOLS=[gcol for gcol,count in gcol2counts.items() if count>min(10,len(df)//100) ]
-                    df_copy=df_copy[df_copy[g_col].isin(GCOLS)]
+                    df_copy=df_copy.filter(df_copy[g_col].is_in(GCOLS) )
+
+                    agg2pl=self.get_agg2pl(t_col)
+
+                    mappl={}
+                    for a in agg:
+                        if type(a)==type('mean'):
+                            try:
+                                mappl[a]=agg2pl[a]
+                            except:
+                                raise ValueError(f"{a} not in {agg2pl.keys()}.")
+                        else:#function
+                            mappl[a.__name__]=pl.col(t_col).map_elements(a)
                     
-                    agg_df = df_copy.groupby(g_col).agg(agg).reset_index()
-                    agg_df.columns = ['_'.join(x) for x in agg_df.columns]
-                    agg_df.columns = [ f'{g_col}_transform_{x}' for x in agg_df.columns if x!=g_col]
-                    agg_df=agg_df.rename(columns={f"{g_col}_transform_{g_col}_":g_col})
+                    agg_df=df_copy.group_by([g_col]).agg(**mappl)
+                    agg_df.columns=[c if c==g_col else f"{g_col}_transform_{t_col}_{c}" for c in agg_df.columns]
                     TE[f"{g_col}_TE_{t_col}"]=agg_df
                 #save TE
                 self.pickle_dump(TE,self.model_save_path+f'TE_repeat{repeat}_fold{fold}_{self.target_col}.model')
@@ -970,21 +994,25 @@ class Yunbase():
             #transform
             for k,agg_df in TE.items():
                 g_col,t_col=k.split("_TE_")
-                X=X.merge(agg_df,on=g_col,how='left')
+                X=X.join(agg_df,on=g_col,how='left')
                 #fillna
-                y=pd.DataFrame({self.target_col:self.target})
-                y=pd.concat((self.features,y),axis=1)
-                agg_df_columns=agg_df.drop([g_col],axis=1).columns
+                y=pl.DataFrame({self.target_col:self.target})
+                y=pl.concat((pl.from_pandas(self.features),y),how="horizontal")
+                agg_df_columns=agg_df.drop([g_col]).columns
+                agg2pl=self.get_agg2pl(t_col)
                 for i in range(len(agg_df_columns)):
+                    agg_col=agg_df_columns[i]
                     agg='null'
-                    for a in ['nunique','count','min','max','first','last',
+                    for s in ['nunique','count','min','max','first','last',
                               'mean','median','sum','std','skew']:
                         #maybe feature has agg such as 'last_status'.
-                        if a==list(agg_df_columns)[i][-len(a):]:
-                            agg=a
+                        if s==agg_col[-len(s):]:
+                            agg=s
                     if agg!='null':
-                        X[agg_df_columns[i]]=X[agg_df_columns[i]].fillna(y[t_col].agg(agg))
-                
+                        nan_value=y.select(agg2pl[agg]).to_numpy()[0][0]
+                        X=X.with_columns(pl.col(agg_col).fill_null(nan_value))
+        X=X.to_pandas()
+            
         return X 
     
     #Feature engineering that needs to be done internally in cross validation.
@@ -1445,7 +1473,6 @@ class Yunbase():
                 X_valid=valid_fold.drop([self.target_col,self.date_col,self.weight_col],axis=1)
                 y_valid=valid_fold[self.target_col]
 
-                #for CV_stat(self,)
                 self.features,self.target=X_train,y_train.values
                 
                 train_weight,valid_weight=train_fold[self.weight_col],valid_fold[self.weight_col]
@@ -1584,7 +1611,7 @@ class Yunbase():
         train_weight=train[self.weight_col]
         X_train=train.drop([self.target_col,self.date_col,self.weight_col],axis=1)
         y_train=train[self.target_col]
-        #for CV_stat(self,)
+        
         self.features,self.target=X_train,y_train.values
         del train
         gc.collect()
@@ -1606,7 +1633,7 @@ class Yunbase():
         
         test_preds=[]
         for model,model_name in self.models:
-            X_train[self.category_cols]=X_train[self.category_cols].astype('category')
+            X_train[self.category_cols]=X_train[self.category_cols].astype(str).astype('category')
             #don't use early_stop,because final_trainset don't have valid_set.
             if 'lgb' in model_name:
                 model.fit(X_train, y_train,sample_weight=train_weight,
@@ -1745,7 +1772,7 @@ class Yunbase():
                 
                 #concat will transform 'category' to 'object'
                 X_train=pd.concat((X_train,test_X),axis=0)
-                X_train[category_cols]=X_train[category_cols].astype('category')
+                X_train[category_cols]=X_train[category_cols].astype(str).astype('category')
                 y_train=pd.concat((y_train,test_y),axis=0)
                 sample_weight_test=pd.DataFrame({'weight':np.ones(len(test_X))*self.pseudo_label_weight*np.mean(sample_weight_train.values)})['weight']
                 sample_weight_train=pd.concat((sample_weight_train,sample_weight_test))
@@ -1758,7 +1785,7 @@ class Yunbase():
                 
                 #concat origin_data aug_data
                 X_train=pd.concat((X_train,aug_data[X_train.columns]),axis=0)
-                X_train[category_cols]=X_train[category_cols].astype('category')
+                X_train[category_cols]=X_train[category_cols].astype(str).astype('category')
                 y_train=pd.concat((y_train,y_train),axis=0)
                 sample_weight_train=pd.concat((sample_weight_train,sample_weight_train),axis=0)
 
@@ -2300,7 +2327,7 @@ class Yunbase():
         if 'catboost' in str(type(model)):#catboost
             test_X[category_cols]=test_X[category_cols].astype('string')
         else:
-            test_X[category_cols]=test_X[category_cols].astype('category')
+            test_X[category_cols]=test_X[category_cols].astype(str).astype('category')
         for idx in range(0,len(test_X),self.infer_size):
             if 'tabnet' in str(type(model)):
                 for c in category_cols:
@@ -2315,7 +2342,7 @@ class Yunbase():
             if 'catboost' in str(type(model)):#catboost
                 test_aug_X[category_cols]=test_aug_X[category_cols].astype('string')
             else:
-                test_aug_X[category_cols]=test_aug_X[category_cols].astype('category')
+                test_aug_X[category_cols]=test_aug_X[category_cols].astype(str).astype('category')
             for idx in range(0,len(test_aug_X),self.infer_size):
                 if 'tabnet' in str(type(model)):
                     for c in category_cols:
@@ -2334,7 +2361,7 @@ class Yunbase():
         if 'catboost' in str(type(model)):#catboost
             test_X[category_cols]=test_X[category_cols].astype('string')
         else:
-            test_X[category_cols]=test_X[category_cols].astype('category')
+            test_X[category_cols]=test_X[category_cols].astype(str).astype('category')
         for idx in range(0,len(test_X),self.infer_size):
             if 'tabnet' in str(type(model)):
                 for c in category_cols:
@@ -2349,7 +2376,7 @@ class Yunbase():
             if 'catboost' in str(type(model)):#catboost
                 test_aug_X[category_cols]=test_aug_X[category_cols].astype('string')
             else:
-                test_aug_X[category_cols]=test_aug_X[category_cols].astype('category')
+                test_aug_X[category_cols]=test_aug_X[category_cols].astype(str).astype('category')
             for idx in range(0,len(test_aug_X),self.infer_size):
                 if 'tabnet' in str(type(model)):
                     for c in category_cols:
