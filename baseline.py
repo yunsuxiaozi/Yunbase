@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/03/16
+@update_time:2025/03/20
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -549,22 +549,22 @@ class Yunbase():
                 error_cnts[i],texts[i]=self.text_correct(texts[i])
             df[f'{text_col}_error_cnts']=error_cnts
         
-        df[text_col+"_ARI"]=df[text_col].swifter.apply(lambda x:self.ARI(x))
-        df[text_col+"_CLRI"]=df[text_col].swifter.apply(lambda x:self.CLRI(x))
-        df[text_col+"_McAlpine_EFLAW"]=df[text_col].swifter.apply(lambda x:self.McAlpine_EFLAW(x))
+        df[text_col+"_ARI"]=df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.ARI(x))
+        df[text_col+"_CLRI"]=df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.CLRI(x))
+        df[text_col+"_McAlpine_EFLAW"]=df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.McAlpine_EFLAW(x))
         #split by ps
         ps='!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
         for i in range(len(ps)):
-            df[text_col+f"split_ps{i}_count"]=df[text_col].swifter.apply(lambda x:len(x.split(ps[i])))
+            df[text_col+f"split_ps{i}_count"]=df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x:len(x.split(ps[i])))
 
         self.PrintColor(f"-> for column {text_col} word feature",color=Fore.RED)
         text_col_word_df=df[['index',text_col]].copy()
         #get word_list   [index,tcol,word_list]
-        text_col_word_df[f'{text_col}_word']=text_col_word_df[text_col].swifter.apply(lambda x:self.text2word(x))
+        text_col_word_df[f'{text_col}_word']=text_col_word_df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.text2word(x))
         #[index,single_word]
         text_col_word_df=text_col_word_df.explode(f'{text_col}_word')[['index',f'{text_col}_word']]
         #[index,single_word,single_word_len]
-        text_col_word_df[f'{text_col}_word_len'] = text_col_word_df[f'{text_col}_word'].swifter.apply(len)
+        text_col_word_df[f'{text_col}_word_len'] = text_col_word_df[f'{text_col}_word'].swifter.allow_dask_on_strings(False).apply(len)
         #data clean [index,single_word,single_word_len]
         text_col_word_df=text_col_word_df[text_col_word_df[f'{text_col}_word_len']!=0]
         #for word features, extract the difference in length between the two words before and after.
@@ -580,12 +580,12 @@ class Yunbase():
         self.PrintColor(f"-> for column {text_col} sentence feature",color=Fore.RED)
         text_col_sent_df=df[['index',text_col]].copy()
         #get sent_list   [index,tcol,sent_list]
-        text_col_sent_df[f'{text_col}_sent']=text_col_sent_df[text_col].swifter.apply(lambda x: self.text2sentence(x))
+        text_col_sent_df[f'{text_col}_sent']=text_col_sent_df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x: self.text2sentence(x))
         #[index,single_sent]
         text_col_sent_df=text_col_sent_df.explode(f'{text_col}_sent')[['index',f'{text_col}_sent']]
         #[index,single_sent,single_sent_len]
-        text_col_sent_df[f'{text_col}_sent_len'] = text_col_sent_df[f'{text_col}_sent'].swifter.apply(len)
-        text_col_sent_df[f'{text_col}_sent_word_count'] = text_col_sent_df[f'{text_col}_sent'].swifter.apply(lambda x:len(re.split('\\ |\\,',x)))
+        text_col_sent_df[f'{text_col}_sent_len'] = text_col_sent_df[f'{text_col}_sent'].swifter.allow_dask_on_strings(False).apply(len)
+        text_col_sent_df[f'{text_col}_sent_word_count'] = text_col_sent_df[f'{text_col}_sent'].swifter.allow_dask_on_strings(False).apply(lambda x:len(re.split('\\ |\\,',x)))
         #data clean [index,single_sent,single_sent_len]
         group_cols=[f'{text_col}_sent_len',f'{text_col}_sent_word_count']
         for gcol in group_cols:
@@ -602,12 +602,12 @@ class Yunbase():
         self.PrintColor(f"-> for column {text_col} paragraph feature",color=Fore.RED)
         text_col_para_df=df[['index',text_col]].copy()
         #get para_list   [index,tcol,para_list]
-        text_col_para_df[f'{text_col}_para']=text_col_para_df[text_col].swifter.apply(lambda x: self.text2paragraph(x))
+        text_col_para_df[f'{text_col}_para']=text_col_para_df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x: self.text2paragraph(x))
         #[index,single_para]
         text_col_para_df=text_col_para_df.explode(f'{text_col}_para')[['index',f'{text_col}_para']]
-        text_col_para_df[f'{text_col}_para_len'] = text_col_para_df[f'{text_col}_para'].swifter.apply(len)
-        text_col_para_df[f'{text_col}_para_sent_count'] = text_col_para_df[f'{text_col}_para'].swifter.apply(lambda x: len(re.split('\\.|\\?|\\!',x)))
-        text_col_para_df[f'{text_col}_para_word_count'] = text_col_para_df[f'{text_col}_para'].swifter.apply(lambda x: len(re.split('\\.|\\?|\\!\\ |\\,',x)))
+        text_col_para_df[f'{text_col}_para_len'] = text_col_para_df[f'{text_col}_para'].swifter.allow_dask_on_strings(False).apply(len)
+        text_col_para_df[f'{text_col}_para_sent_count'] = text_col_para_df[f'{text_col}_para'].swifter.allow_dask_on_strings(False).apply(lambda x: len(re.split('\\.|\\?|\\!',x)))
+        text_col_para_df[f'{text_col}_para_word_count'] = text_col_para_df[f'{text_col}_para'].swifter.allow_dask_on_strings(False).apply(lambda x: len(re.split('\\.|\\?|\\!\\ |\\,',x)))
         #data clean [index,single_sent,single_sent_len]
         group_cols=[f'{text_col}_para_len',f'{text_col}_para_sent_count',f'{text_col}_para_word_count']
         for gcol in group_cols:
@@ -639,12 +639,12 @@ class Yunbase():
             self.PrintColor(f"-> for column {pt_col} text clean",color=Fore.YELLOW)
             df[pt_col]=(df[pt_col].fillna('nan'))
             if df[pt_col].nunique()>0.5*len(df):
-                df[pt_col]=df[pt_col].swifter.apply(lambda x:self.clean_text(x))
+                df[pt_col]=df[pt_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.clean_text(x))
             else:#use dict to clean,save time.
                 text2clean={}
                 for text in df[pt_col].unique():
                     text2clean[text]=self.clean_text(text)
-                df[pt_col]=df[pt_col].swifter.apply(lambda x:text2clean.get(x,'nan'))
+                df[pt_col]=df[pt_col].swifter.allow_dask_on_strings(False).apply(lambda x:text2clean.get(x,'nan'))
                 del text2clean
                 gc.collect()
         
@@ -742,15 +742,14 @@ class Yunbase():
         #category columns
         for col in self.category_cols:
             #preprocessing
-            df[col]=df[col].swifter.apply(lambda x:str(x).lower())
-            df=self.label_encoder(df,label_encoder_cols=[col],fold=self.num_folds)
+            df[col]=df[col].swifter.allow_dask_on_strings(False).apply(lambda x:str(x).lower())
             df[col]=df[col].astype(str).astype('category')
         
         if len(self.list_stat):
             print("< list column's feature >")
             for (l_col,l_gaps) in self.list_stat:
                 try:#if str(list),transform '[a,b]' to [a,b]
-                    df[l_col]=df[l_col].swifter.apply(lambda x:ast.literal_eval(x))
+                    df[l_col]=df[l_col].swifter.allow_dask_on_strings(False).apply(lambda x:ast.literal_eval(x))
                 except:#origin data is list or data can't be parsed.
                     #<class 'numpy.ndarray'> [10103]
                     if not isinstance(list(df[l_col].dropna().values[0]),list):
@@ -771,7 +770,7 @@ class Yunbase():
                 list_col_agg_df = list_col_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
                 list_col_agg_df.columns = ['_'.join(x) for x in list_col_agg_df.columns]
                 df=df.merge(list_col_agg_df,on='index',how='left')
-                df[f'{l_col}_len']=df[l_col].swifter.apply(len)
+                df[f'{l_col}_len']=df[l_col].swifter.allow_dask_on_strings(False).apply(len)
                 
                 for gcol in group_cols:
                     if (f'{gcol}_max' in df.columns) and (f'{gcol}_min' in df.columns):
@@ -942,7 +941,7 @@ class Yunbase():
                 if self.save_trained_models:
                     self.pickle_dump(le,self.model_save_path+f'le_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model')
                 self.trained_le[f'le_{col}_repeat{repeat}_fold{fold}.model']=copy.deepcopy(le)
-            df[col] = df[col].swifter.apply(lambda x:le.get(x,0)) 
+            df[col] = df[col].swifter.allow_dask_on_strings(False).apply(lambda x:le.get(x,0)) 
         return df
 
     def get_agg2pl(self,t_col):
@@ -1012,8 +1011,12 @@ class Yunbase():
                         if s==agg_col[-len(s):]:
                             agg=s
                     if agg!='null':
-                        nan_value=y.select(agg2pl[agg]).to_numpy()[0][0]
-                        X=X.with_columns(pl.col(agg_col).fill_null(nan_value))
+                        nan_value=y[[t_col]].select(agg2pl[agg]).to_numpy()[0][0]
+                        try:
+                            X=X.with_columns(pl.col(agg_col).fill_null(nan_value))
+                        except:
+                            print(agg_col,nan_value)
+                            pass
         X=X.to_pandas()
             
         return X 
@@ -1081,8 +1084,10 @@ class Yunbase():
                     word2vec_feats=svd.transform(word2vec_feats)
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
-        #drop object_cols here because CV_stat may use category_string_cols.
-        df.drop(self.colname_clean(self.word2vec_cols+self.labelencoder_cols+self.object_cols),axis=1,inplace=True,errors='ignore')
+        #word2vec_cols maybe category_cols.
+        drop_word2vec_cols=[c for c in self.word2vec_cols if c not in self.colname_clean(self.category_cols)]
+        #drop object_cols here(not base_FE) because CV_stat may use category_string_cols.
+        df.drop(self.colname_clean(drop_word2vec_cols+self.labelencoder_cols+self.object_cols),axis=1,inplace=True,errors='ignore')
         #after this operation,df will be dropped into model,so we need to Convert object to floating-point numbers
         for col in df.columns:
             if (df[col].dtype==object):
@@ -1308,6 +1313,8 @@ class Yunbase():
         elif mode=='test':
             test=file.drop([self.target_col],axis=1,errors='ignore').copy()
             for c in test.columns:#c:column
+                if self.col2dtype.get(c,object) in ['int64','int32','int16','int8']:
+                    test[c]=test[c].fillna(-1)#missing value
                 test[c]=test[c].astype(self.col2dtype.get(c,object))
             return test
         else:#submission.csv or you just want to load data.
@@ -1543,7 +1550,7 @@ class Yunbase():
                             if X_train[X_train_columns[idx]].dtype=='category':
                                 cat_idxs.append(idx)
                                 cat_dims.append(self.train[X_train_columns[idx]].nunique())
-                                X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].swifter.apply(lambda x:int(x)).astype(np.int32)          
+                                X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)          
                         params=model.get_params()
                         params['cat_idxs']=cat_idxs
                         params['cat_dims']=cat_dims
@@ -1662,7 +1669,7 @@ class Yunbase():
                     if X_train[X_train_columns[idx]].dtype=='category':
                         cat_idxs.append(idx)
                         cat_dims.append(self.train[X_train_columns[idx]].nunique())
-                        X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].swifter.apply(lambda x:int(x)).astype(np.int32)      
+                        X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)      
                          
                 params=model.get_params()
                 params['cat_idxs']=cat_idxs
@@ -1848,8 +1855,8 @@ class Yunbase():
                      if X_train[X_train_columns[idx]].dtype=='category':
                          cat_idxs.append(idx)
                          cat_dims.append(X[X_train_columns[idx]].nunique())
-                         X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].swifter.apply(lambda x:int(x)).astype(np.int32)      
-                         X_valid[X_train_columns[idx]]=X_valid[X_train_columns[idx]].swifter.apply(lambda x:int(x)).astype(np.int32)      
+                         X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)      
+                         X_valid[X_train_columns[idx]]=X_valid[X_train_columns[idx]].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)      
                  params=model.get_params()
                  params['cat_idxs']=cat_idxs
                  params['cat_dims']=cat_dims
@@ -2036,7 +2043,7 @@ class Yunbase():
         for tgt,idx in self.target2idx.items():
                 self.idx2target[idx]=tgt
             
-        y=y.swifter.apply(lambda k:self.target2idx[k])
+        y=y.swifter.allow_dask_on_strings(False).apply(lambda k:self.target2idx[k])
         return y
     
     def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
@@ -2242,7 +2249,7 @@ class Yunbase():
                     random_group=unique_group.copy()
                     np.random.shuffle(random_group)
                     random_map={k:v for k,v in zip(unique_group,random_group)}
-                    group=group.swifter.apply(lambda x:random_map[x])
+                    group=group.swifter.allow_dask_on_strings(False).apply(lambda x:random_map[x])
                     group=group.sort_values()
                     X=X.loc[list(group.index)]
                     y=y.loc[list(group.index)]
@@ -2350,7 +2357,7 @@ class Yunbase():
         for idx in range(0,len(test_X),self.infer_size):
             if 'tabnet' in str(type(model)):
                 for c in category_cols:
-                   test_X[c]=test_X[c].swifter.apply(lambda x:int(x)).astype(np.int32)     
+                   test_X[c]=test_X[c].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)     
                 test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
             else:   
                 test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size])  
@@ -2365,7 +2372,7 @@ class Yunbase():
             for idx in range(0,len(test_aug_X),self.infer_size):
                 if 'tabnet' in str(type(model)):
                     for c in category_cols:
-                       test_aug_X[c]=test_aug_X[c].swifter.apply(lambda x:int(x)).astype(np.int32)     
+                       test_aug_X[c]=test_aug_X[c].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)     
                     test_aug_preds[idx:idx+self.infer_size]=model.predict(test_aug_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
                 else:   
                     test_aug_preds[idx:idx+self.infer_size]=model.predict(test_aug_X[idx:idx+self.infer_size])  
@@ -2384,7 +2391,7 @@ class Yunbase():
         for idx in range(0,len(test_X),self.infer_size):
             if 'tabnet' in str(type(model)):
                 for c in category_cols:
-                    test_X[c]=test_X[c].swifter.apply(lambda x:int(x)).astype(np.int32)     
+                    test_X[c]=test_X[c].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)     
                 test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size].to_numpy())
             else:
                 test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size])
@@ -2399,7 +2406,7 @@ class Yunbase():
             for idx in range(0,len(test_aug_X),self.infer_size):
                 if 'tabnet' in str(type(model)):
                     for c in category_cols:
-                       test_aug_X[c]=test_aug_X[c].swifter.apply(lambda x:int(x)).astype(np.int32)     
+                       test_aug_X[c]=test_aug_X[c].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)     
                     test_aug_preds[idx:idx+self.infer_size]=model.predict_proba(test_aug_X[idx:idx+self.infer_size].to_numpy())
                 else:   
                     test_aug_preds[idx:idx+self.infer_size]=model.predict_proba(test_aug_X[idx:idx+self.infer_size])  
@@ -2677,7 +2684,7 @@ class Yunbase():
         if self.objective!='regression':
             #auc and your custom auc metric
             if 'auc' not in self.metric:
-                submission[self.target_col]=submission[self.target_col].swifter.apply(lambda x:self.idx2target[x])
+                submission[self.target_col]=submission[self.target_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.idx2target[x])
         #deal with bool.
         if 'auc'  not in self.metric:
             submission[self.target_col]=submission[self.target_col].astype(self.target_dtype)
