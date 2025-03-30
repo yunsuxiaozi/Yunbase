@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/03/20
+@update_time:2025/03/30
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -963,7 +963,7 @@ class Yunbase():
                 df=pl.concat((X,y),how="horizontal")
                 #repeat i fold j's TE  cat_col2value 
                 TE={}
-                for (g_col,t_col,agg) in self.target_stat:
+                for (g_col,t_col,aggs) in self.target_stat:
                     g_col=self.colname_clean([g_col])[0]
                     if t_col!=self.target_col:
                         t_col=self.colname_clean([t_col])[0]
@@ -977,14 +977,14 @@ class Yunbase():
                     agg2pl=self.get_agg2pl(t_col)
 
                     mappl={}
-                    for a in agg:
-                        if type(a)==type('mean'):
+                    for agg in aggs:
+                        if type(agg)==type('mean'):
                             try:
-                                mappl[a]=agg2pl[a]
+                                mappl[agg]=agg2pl[agg]
                             except:
-                                raise ValueError(f"{a} not in {agg2pl.keys()}.")
-                        else:#function
-                            mappl[a.__name__]=pl.col(t_col).map_elements(a)
+                                raise ValueError(f"{agg} not in {agg2pl.keys()}.")
+                        else:#tuple(function_name,function)
+                            mappl[agg[0]]=pl.col(t_col).map_elements(agg[1])
                     
                     agg_df=df_copy.group_by([g_col]).agg(**mappl)
                     agg_df.columns=[c if c==g_col else f"{g_col}_transform_{t_col}_{c}" for c in agg_df.columns]
@@ -1015,7 +1015,6 @@ class Yunbase():
                         try:
                             X=X.with_columns(pl.col(agg_col).fill_null(nan_value))
                         except:
-                            print(agg_col,nan_value)
                             pass
         X=X.to_pandas()
             
@@ -1121,18 +1120,35 @@ class Yunbase():
 
     def Medae(self,y_true:np.array,y_pred:np.array):
         return np.median(np.abs(y_true-y_pred))
-    
-    def Metric(self,y_true:np.array,y_pred:np.array,weight=np.zeros(0))->float:#for multi_class,labeland proability
-        #due to the use of the reduce_mem function to reduce memory, it may result in over range after data addition.
+
+    def Metric(self,y_true:np.array,y_pred:np.array,weight=np.zeros(0),
+               #y_true/y_pred:for classification,label and proability.
+               mode:Literal['lenient','strict']='lenient')->float:
+        #due to the use of the reduce_mem function to reduce memory,it may result in over range after data addition.
         if self.objective=='regression':
             y_true,y_pred=y_true.astype(np.float64),y_pred.astype(np.float64)
         else:
             y_true,y_pred=y_true.astype(np.int64),y_pred.astype(np.float64)
+        if mode=='strict':#The strict version does not allow nan or inf.
+            if np.any(np.isnan(y_true)) or np.any(np.isnan(y_pred)):
+                raise ValueError("y_true or y_pred contains NaN values.")
+            if np.any(np.isinf(y_true)) or np.any(np.isinf(y_pred)):
+                raise ValueError("y_true or y_pred contains infinite values.")
+        else:#The lenient version removes nan and inf.
+            def find_illegal_rows(y):
+                y=np.isnan(y)|np.isinf(y)
+                if len(y.shape)==2:
+                    y=np.mean(y,axis=1)
+                return np.where(y>0)[0]
+            illegal_rows=list(set(list(find_illegal_rows(y_true))+list(find_illegal_rows(y_pred))))
+            legal_rows=[i for i in range(len(y_true)) if i not in illegal_rows]
+            y_true,y_pred=y_true[legal_rows],y_pred[legal_rows]
+            
         #use cutom_metric when you define.
         if self.custom_metric!=None:
             if len(weight)!=0:
                 return self.custom_metric(y_true,y_pred,weight)
-            else:
+            else:#weight=np.zeros(0)
                 try:
                     return self.custom_metric(y_true,y_pred)
                 except:
@@ -1153,8 +1169,9 @@ class Yunbase():
             elif self.metric=='msle':
                 y_pred=np.clip(y_pred,0,1e20)
                 return np.mean((np.log1p(y_true)-np.log1p(y_pred))**2)
-            elif self.metric=='mape':
-                return np.mean(np.abs(y_pred-y_true)/(y_true+self.eps))
+            elif self.metric=='mape':#y_true>0 or not?
+                y_true[y_true<1]=1
+                return np.mean(np.abs(y_true-y_pred)/(np.abs(y_true)+self.eps))
             elif self.metric=='r2':
                 return 1-np.sum ((y_true-y_pred)**2)/np.sum ((y_true-np.mean(y_true))**2)
             elif self.metric=='smape':
@@ -1200,10 +1217,10 @@ class Yunbase():
     
     def optuna_lgb(self,X:pd.DataFrame,y:pd.DataFrame,group,kf_folds:pd.DataFrame,metric:str)->dict:
         def objective(trial):
+            objective=None if self.metric not in ['mae','mape','smape'] else 'regression_l1'
             params = {
-                "boosting_type": "gbdt","metric": metric,
-                'random_state': self.seed,
-                'n_estimators': trial.suggest_int('n_estimators', 500,1500),
+                "boosting_type": "gbdt","metric": metric,'objective':objective,
+                'random_state': self.seed,'n_estimators': trial.suggest_int('n_estimators', 500,1500),
                 'reg_alpha': trial.suggest_loguniform('reg_alpha', 1e-3, 10.0),
                 'reg_lambda': trial.suggest_loguniform('reg_lambda', 1e-3, 10.0),
                 'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1),
@@ -2111,28 +2128,29 @@ class Yunbase():
         #if you don't use your own models,then use built-in models.
         self.PrintColor("load models")
         if len(self.models)==0:
-            
-            metric=self.metric
+
+            #init objective and metric
+            metric,objective=self.metric,None
             if self.objective=='multi_class':
                 metric='multi_logloss'
             #lightgbm don't support f1_score,but we will calculate f1_score as Metric.
             if metric in ['f1_score','mcc','logloss','pr_auc','accuracy']:
                 metric='auc'
             elif metric in ['medae','mape','smape']:
-                metric='mae'
+                metric,objective='mae','regression_l1'
             elif metric in ['rmsle','msle','r2']:
-                metric='mse'
+                metric,objective='mse','regression'
             if self.custom_metric!=None:
-                if self.objective=='regression':
-                    metric='rmse'
-                elif self.objective=='binary':
-                    metric='auc'
-                elif self.objective=='multi_class':
-                    metric='multi_logloss'
-            lgb_params={"boosting_type": "gbdt","metric": metric,
+                #objective to metric
+                lgb_o2m={'regression':'rmse','binary':'auc','multi_class':'multi_logloss'}
+                metric=lgb_o2m[self.objective]
+            #objective='regression','regression_l1','huber','fair','poisson','quantile','mape','gamma',
+            #'tweedie','binary','multiclass','multiclassova','cross_entropy','cross_entropy_lambda'
+            lgb_params={"boosting_type": "gbdt","metric": metric,'objective':objective,
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.1,
-                        "n_estimators": 20000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,"verbose": -1,"reg_alpha": 0.2,
-                        "reg_lambda": 5,"extra_trees":True,'num_leaves':64,"max_bin":255,
+                        "n_estimators": 20000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,
+                        "verbose": -1,"reg_alpha": 0.2,"reg_lambda": 5,
+                        "extra_trees":True,'num_leaves':64,"max_bin":255,
                         'importance_type': 'gain',#better than 'split'
                         }
             #find new params then use optuna
@@ -2175,31 +2193,26 @@ class Yunbase():
             metric2params={#regression
                           'mse':'RMSE','rmsle':'RMSE','msle':'MSLE','rmse':'RMSE',
                            'mae':'MAE','medae':'MAE','mape':'MAPE','r2':'R2','smape':'SMAPE',
-                          #classification
+                           #classification
                            'accuracy':'Accuracy','logloss':'Logloss','multi_logloss':'Accuracy',
                            'f1_score':'F1','auc':'AUC','mcc':'MCC','pr_auc':'PRAUC',
                           }
             metric=metric2params.get(self.metric,'None')
             
             if self.custom_metric!=None:#use your custom_metric
-                if self.objective=='regression':
-                    metric='RMSE'
-                elif self.objective=='binary':
-                    metric='Logloss'
-                else:
-                    metric='Accuracy'
-                    
-            cat_params={
-                       'random_state':self.seed,
-                       'eval_metric'         : metric,
-                       'bagging_temperature' : 0.50,
-                       'iterations'          : 20000,
-                       'learning_rate'       : 0.1,
-                       'max_depth'           : 12,
-                       'l2_leaf_reg'         : 1.25,
-                       'min_data_in_leaf'    : 24,
-                       'random_strength'     : 0.25, 
-                       'verbose'             : 0,
+                #objective to metric
+                cat_o2m={'regression':'RMSE','binary':'Logloss','multi_class':'Accuracy'}
+                metric=cat_o2m[self.objective]
+            #objective to loss function
+            cat_o2l={'regression':'RMSE','binary':'Logloss','multi_class':'Multiclass'}
+            loss_function=cat_o2l[self.objective]
+            #metric to loss_function (MAE and MAPE)
+            if metric in ['MAE','MAPE']:
+                loss_function=metric    
+            cat_params={'loss_function':loss_function,'random_state':self.seed,'eval_metric': metric,
+                       'bagging_temperature' : 0.50,'iterations': 20000,'learning_rate': 0.1,
+                        'max_depth': 12,'l2_leaf_reg': 1.25,'min_data_in_leaf': 24,
+                        'random_strength': 0.25, 'verbose' : 0,
                       }
             xgb_params={'random_state': self.seed, 'n_estimators': 20000, 
                         'learning_rate': 0.1, 'max_depth': 10,
