@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/03/30
+@update_time:2025/04/13
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -106,6 +106,7 @@ class Yunbase():
                       use_eval_metric:bool=True,
                       feats_stat:list[tuple]=[],
                       target_stat:list[tuple]=[],
+                      targetencoder_with_kfold:bool=False,
                       use_spellchecker:bool=False,
                       AGGREGATIONS:list=['nunique','count','min','max','first',
                                            'last', 'mean','median','sum','std','skew',kurtosis],
@@ -190,6 +191,10 @@ class Yunbase():
                                example:target_stat = [ (group_col,target_col, aggregation_list)   ]
                                To make it more versatile, you can also use  other variables 
                                besides target to encode categorical variables.
+        targetencoder_with_kfold:The difference between False and True is whether the 
+                               training data (train) in cross validation (full=train+valid) uses 
+                               the entire training data (train)'s Target Encoder directly,or is 
+                               assigned through cross validation in the training data (train=tr+va).
         use_spellchecker      :use SpellChecker to correct word in text.
         AGGREGATIONS          :['nunique','count','min','max','first','last',
                                'mean','median','sum','std','skew',kurtosis,q1,q3],
@@ -313,11 +318,12 @@ class Yunbase():
         self.use_eval_metric=use_eval_metric
         self.use_TTA=use_TTA
         self.use_spellchecker=use_spellchecker
+        self.targetencoder_with_kfold=targetencoder_with_kfold
 
         attritubes=['save_oof_preds','save_test_preds','exp_mode',
                     'use_reduce_memory','use_data_augmentation','use_scaler',
                     'use_oof_as_feature','use_CIR','use_median_as_pred','use_eval_metric',
-                    'use_spellchecker','use_TTA'
+                    'use_spellchecker','use_TTA','targetencoder_with_kfold'
                    ]
         for attr in attritubes:
             if getattr(self,attr) not in [True,False]:
@@ -375,6 +381,7 @@ class Yunbase():
                      'use_median_as_pred':self.use_median_as_pred,'use_scaler':self.use_scaler,
                      'use_TTA':self.use_TTA,'use_eval_metric':self.use_eval_metric,
                      'feats_stat':self.feats_stat,'target_stat':self.target_stat,
+                     'targetencoder_with_kfold':self.targetencoder_with_kfold,
                      'use_spellchecker':self.use_spellchecker,'AGGREGATIONS':self.AGGREGATIONS,
                      'category_cols':self.category_cols,
               }
@@ -949,11 +956,22 @@ class Yunbase():
         return  {'nunique':pl.col(t_col).n_unique(),'count':pl.col(t_col).count(),
                  'min':pl.col(t_col).min(),'max':pl.col(t_col).max(),
                  'first':pl.col(t_col).first(),'last':pl.col(t_col).last(),
-                'mean': pl.col(t_col).mean(),'sum':pl.col(t_col).sum(),"std": pl.col(t_col).std(),
-                'median':pl.col(t_col).median(),'skew':pl.col(t_col).skew()  }
+                 'mean': pl.col(t_col).mean(),'sum':pl.col(t_col).sum(),"std": pl.col(t_col).std(),
+                 'median':pl.col(t_col).median(),'skew':pl.col(t_col).skew(),
+                 
+                 'ptp':pl.col(t_col).max()-pl.col(t_col).min(),
+                 'nunique/count':pl.col(t_col).n_unique()/pl.col(t_col).count(),
+                 'mean/std':pl.col(t_col).mean()/pl.col(t_col).std()
+                }
 
+    """
+    What is being done here is the TargetEncoder.
+    The difference between the two functions is whether the training data (train) in cross validation
+    (full=train+valid) uses the entire training data (train)'s Target Encoder directly,
+    or is assigned through cross validation in the training data (train=tr+va).
+    """
     #reference: https://www.kaggle.com/code/cdeotte/first-place-single-model-cv-1-016-lb-1-016   In[6]
-    def CV_stat(self,X,y=None,repeat:int=0,fold:int=0):
+    def CV_stat_without_kfold(self,X,y=None,repeat:int=0,fold:int=0):
         X=pl.from_pandas(X)
         if len(self.target_stat):
             if type(y)==type(None):#valid set or test set(transform)
@@ -1017,8 +1035,128 @@ class Yunbase():
                         except:
                             pass
         X=X.to_pandas()
+        return X
+
+    #reference: https://www.kaggle.com/code/cdeotte/first-place-single-model-cv-1-016-lb-1-016   In[6]
+    def CV_stat_with_kfold(self,X,y=None,repeat:int=0,fold:int=0):
+        #polars don't have 'index','iloc'.
+        X['temp_index']=X.index
+        X=pl.from_pandas(X)
+        if len(self.target_stat):
+            if type(y)!=type(None):#train set(fit and transform)
+                #train_df,not full_df
+                y=pl.DataFrame({self.target_col:y.values})
+                df=pl.concat((X,y),how="horizontal")
+                
+                #TargetEncoder for valid/test set. use full trainset to agg.
+                TE={}
+                for (g_col,t_col,aggs) in self.target_stat:
+                    g_col=self.colname_clean([g_col])[0]
+                    if t_col!=self.target_col:
+                        t_col=self.colname_clean([t_col])[0]
+                        
+                    #deal with value_counts()<10 
+                    df_copy=copy.deepcopy(df[[g_col,t_col]])
+                    gcol2counts=df_copy[g_col].to_pandas().value_counts().to_dict()
+                    GCOLS=[gcol for gcol,count in gcol2counts.items() if count>min(10,len(df)//100) ]
+                    df_copy=df_copy.filter(df_copy[g_col].is_in(GCOLS) )
+
+                    agg2pl=self.get_agg2pl(t_col)
+                    mappl={}
+                    for agg in aggs:
+                        if type(agg)==type('mean'):
+                            try:
+                                mappl[agg]=agg2pl[agg]
+                            except:
+                                raise ValueError(f"{agg} not in {agg2pl.keys()}.")
+                        else:#tuple(function_name,function)
+                            mappl[agg[0]]=pl.col(t_col).map_elements(agg[1])
+                    
+                    agg_df=df_copy.group_by([g_col]).agg(**mappl)
+                    agg_df.columns=[c if c==g_col else f"{g_col}_transform_{t_col}_{c}" for c in agg_df.columns]
+                    TE[f"{g_col}_TE_{t_col}"]=agg_df
+                #save TE
+                if self.save_trained_models:
+                    self.pickle_dump(TE,self.model_save_path+f'TE_repeat{repeat}_fold{fold}_{self.target_col}.model')
+                self.trained_TE[f'TE_repeat{repeat}_fold{fold}.model']=copy.deepcopy(TE)
+
+                #train set fit and transform,use kfold num_folds=5,index%5.
+                for fold in range(5):
+                    #train set in trainset.
+                    train_TE=df.filter(pl.col('temp_index')%5!=fold)
+                    for (g_col,t_col,aggs) in self.target_stat:
+                        #colname_clean deal with json
+                        g_col=self.colname_clean([g_col])[0]
+                        if t_col!=self.target_col:
+                            t_col=self.colname_clean([t_col])[0]
+                            
+                        #deal with value_counts()<10 
+                        df_copy=copy.deepcopy(train_TE[[g_col,t_col]])
+                        gcol2counts=df_copy[g_col].to_pandas().value_counts().to_dict()
+                        GCOLS=[gcol for gcol,count in gcol2counts.items() if count>min(5,len(df)//100) ]
+                        df_copy=df_copy.filter(df_copy[g_col].is_in(GCOLS) )
+    
+                        agg2pl=self.get_agg2pl(t_col)
+                        mappl={}
+                        for agg in aggs:
+                            if type(agg)==type('mean'):
+                                try:
+                                    mappl[agg]=agg2pl[agg]
+                                except:
+                                    raise ValueError(f"{agg} not in {agg2pl.keys()}.")
+                            else:#tuple(function_name,function)
+                                mappl[agg[0]]=pl.col(t_col).map_elements(agg[1])
+                        
+                        agg_df=df_copy.group_by([g_col]).agg(**mappl)
+                        agg_df.columns=[c if c==g_col else f"{g_col}_transform_{t_col}_{c}" for c in agg_df.columns]
+
+                        #when fold=0,X don't have agg_df.columns
+                        for col in agg_df.columns:
+                            if col not in X.columns:
+                                X=X.with_columns(pl.lit(1).alias(col))
+
+                        #fold{fold}_columns
+                        agg_df.columns=[f"fold{fold}_"+c if c!=g_col else c for c in agg_df.columns ]
+                        X=X.join(agg_df,on=g_col,how='left')
+                        for col in agg_df.columns:
+                            if col!=g_col:
+                                X=X.with_columns(pl.when(pl.col('temp_index')%5==fold)
+                                    .then(pl.col(col)).otherwise(pl.col(col[len(f"fold{fold}_"):])) 
+                                    .alias(col[len(f"fold{fold}_"):]) )
+                        X=X.drop([c for c in agg_df.columns if c!=g_col])
+                        
+            else:#valid set/test set,transform with full trainset AGGS.
+                #TargetEncoder
+                TE=self.trained_TE[f'TE_repeat{repeat}_fold{fold}.model']
+                for k,agg_df in TE.items():
+                    g_col,t_col=k.split("_TE_")
+                    X=X.join(agg_df,on=g_col,how='left')
+                    
+            #full data to fillna (train/valid/test set).
+            y=pl.DataFrame({self.target_col:self.target})
+            full_df=pl.concat((pl.from_pandas(self.features),y),how="horizontal")
+            for k,agg_df in TE.items():
+                g_col,t_col=k.split("_TE_")
+                #fillna with full_df.
+                agg_df_columns=agg_df.drop([g_col]).columns
+                agg2pl=self.get_agg2pl(t_col)
+                for i in range(len(agg_df_columns)):
+                    agg_col=agg_df_columns[i]
+                    agg='null'
+                    for s in ['nunique','count','min','max','first','last',
+                              'mean','median','sum','std','skew']:
+                        #maybe feature has agg such as 'last_status'.
+                        if s==agg_col[-len(s):]:
+                            agg=s
+                    if agg!='null':
+                        nan_value=full_df[[t_col]].select(agg2pl[agg]).to_numpy()[0][0]
+                        try:
+                            X=X.with_columns(pl.col(agg_col).fill_null(nan_value))
+                        except:
+                            pass
+        X=X.to_pandas().drop(['temp_index'],axis=1)
             
-        return X 
+        return X
     
     #Feature engineering that needs to be done internally in cross validation.
     def CV_FE(self,df:pd.DataFrame,mode:str='train',fold:int=0,repeat:int=0)->pd.DataFrame:
@@ -1247,7 +1385,7 @@ class Yunbase():
                                                          log=self.log,use_pseudo_label=self.use_pseudo_label,
                                                          test=self.test,group_col=self.group_col,target_col=self.target_col,
                                                          category_cols=self.colname_clean(copy.deepcopy(self.category_cols)),
-                                                         CV_stat=self.CV_stat,
+                                                         CV_stat=self.CV_stat_with_kfold if self.targetencoder_with_kfold else self.CV_stat_without_kfold,
                                                          use_data_augmentation=self.use_data_augmentation,
                                                          CV_sample=self.CV_sample,device=self.device,
                                                          early_stop=self.early_stop,use_eval_metric=self.use_eval_metric,
@@ -1511,8 +1649,12 @@ class Yunbase():
                 del train_fold,valid_fold
                 gc.collect()
 
-                X_train=self.CV_stat(X_train,y_train,repeat=0,fold=fold)
-                X_valid=self.CV_stat(X_valid,repeat=0,fold=fold)
+                if self.targetencoder_with_kfold:
+                    X_train=self.CV_stat_with_kfold(X_train,y_train,repeat=0,fold=fold)
+                    X_valid=self.CV_stat_with_kfold(X_valid,repeat=0,fold=fold)
+                else:
+                    X_train=self.CV_stat_without_kfold(X_train,y_train,repeat=0,fold=fold)
+                    X_valid=self.CV_stat_without_kfold(X_valid,repeat=0,fold=fold)
                 
                 X_train=self.CV_FE(X_train,mode='train',fold=fold)
                 X_valid=self.CV_FE(X_valid,mode='test',fold=fold)
@@ -1651,8 +1793,13 @@ class Yunbase():
         
         test_X=self.test.drop([self.date_col],axis=1)
 
-        X_train=self.CV_stat(X_train,y_train,repeat=0,fold=self.num_folds)
-        test_X=self.CV_stat(test_X,repeat=0,fold=self.num_folds)
+        
+        if self.targetencoder_with_kfold:
+            X_train=self.CV_stat_with_kfold(X_train,y_train,repeat=0,fold=self.num_folds)
+            test_X=self.CV_stat_with_kfold(test_X,repeat=0,fold=self.num_folds)
+        else:
+            X_train=self.CV_stat_without_kfold(X_train,y_train,repeat=0,fold=self.num_folds)
+            test_X=self.CV_stat_without_kfold(test_X,repeat=0,fold=self.num_folds)
         
         X_train=self.CV_FE(X_train,mode='train',fold=self.num_folds)
         test_X=self.CV_FE(test_X,mode='test',fold=self.num_folds)
@@ -2214,11 +2361,14 @@ class Yunbase():
                         'max_depth': 12,'l2_leaf_reg': 1.25,'min_data_in_leaf': 24,
                         'random_strength': 0.25, 'verbose' : 0,
                       }
+            #grow_policy:depthwise/lossguide:
+            #https://www.kaggle.com/code/sureshmecad/xgboost-hyperparameter-autompg
+            #https://www.kaggle.com/discussions/general/238684
             xgb_params={'random_state': self.seed, 'n_estimators': 20000, 
                         'learning_rate': 0.1, 'max_depth': 10,
-                        'reg_alpha': 0.08, 'reg_lambda': 0.8, 
+                        'reg_alpha': 0.2, 'reg_lambda': 5, 
                         'subsample': 0.95, 'colsample_bytree': 0.6, 
-                        'min_child_weight': 3,'early_stopping_rounds':self.early_stop,
+                        'min_child_weight': 5,'early_stopping_rounds':self.early_stop,
                         'enable_categorical':True,
                        }
 
@@ -2298,7 +2448,7 @@ class Yunbase():
                                                              log=self.log,use_pseudo_label=self.use_pseudo_label,
                                                              test=self.test,group_col=self.group_col,target_col=self.target_col,
                                                              category_cols=self.colname_clean(copy.deepcopy(self.category_cols)),
-                                                             CV_stat=self.CV_stat,
+                                                             CV_stat=self.CV_stat_with_kfold if self.targetencoder_with_kfold else self.CV_stat_without_kfold,
                                                              use_data_augmentation=self.use_data_augmentation,
                                                              CV_sample=self.CV_sample,device=self.device,
                                                              early_stop=self.early_stop,use_eval_metric=self.use_eval_metric,
@@ -2463,7 +2613,11 @@ class Yunbase():
             self.PrintColor("prediction on test data")
             test_preds=np.zeros((len(self.models)*self.n_repeats,len(self.test)))
             for idx in range(len(self.trained_models)): 
-                test_copy=self.CV_stat(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+                if self.targetencoder_with_kfold:
+                    test_copy=self.CV_stat_with_kfold(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+                else:
+                    test_copy=self.CV_stat_without_kfold(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+                    
                 test_copy=self.CV_FE(test_copy,mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
                 try:
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
@@ -2501,7 +2655,11 @@ class Yunbase():
                 
                 test_preds=np.zeros((len(self.models)*self.n_repeats,len(self.test)))
                 for idx in range(len(self.trained_models)):
-                    test_copy=self.CV_stat(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+                    if self.targetencoder_with_kfold:
+                        test_copy=self.CV_stat_with_kfold(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+                    else:
+                        test_copy=self.CV_stat_without_kfold(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+                    
                     test_copy=self.CV_FE(test_copy,mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds))
                     try:
                         test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
@@ -2566,7 +2724,12 @@ class Yunbase():
         self.PrintColor("prediction on test data")
         test_preds=np.zeros((len(self.models)*self.n_repeats,len(self.test),self.num_classes))
         for idx in range(len(self.trained_models)):
-            test_copy=self.CV_stat(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+            if self.targetencoder_with_kfold:
+                test_copy=self.CV_stat_with_kfold(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+            else:
+                test_copy=self.CV_stat_without_kfold(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+                    
+            
             test_copy=self.CV_FE(test_copy,mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds))
             try:
                 test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
@@ -2597,7 +2760,13 @@ class Yunbase():
             self.cal_final_score(weights)
             test_preds=np.zeros((len(self.models)*self.n_repeats,len(self.test),self.num_classes))
             for idx in range(len(self.trained_models)):
-                test_copy=self.CV_stat(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+                if self.targetencoder_with_kfold:
+                    test_copy=self.CV_stat_with_kfold(X=self.test.copy(),fold=idx%self.num_folds,
+                                                      repeat=idx//(len(self.models)*self.num_folds)  )
+                else:
+                    test_copy=self.CV_stat_without_kfold(X=self.test.copy(),fold=idx%self.num_folds,
+                                                         repeat=idx//(len(self.models)*self.num_folds)  )
+                    
                 test_copy=self.CV_FE(test_copy,mode='test',fold=idx%self.num_folds, repeat=idx//(len(self.models)*self.num_folds))
                 try:
                     test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy.drop([self.target_col],axis=1))
