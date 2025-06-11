@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/04/13
+@update_time:2025/06/11
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -164,7 +164,7 @@ class Yunbase():
                                such as [] or '[]', this can be used to extract diff and 
                                shift features for list_cols.
         word2vec_models       :Use models such as tfidf to extract features of string columns.
-                               example:word2vec_models=[(TfidfVectorizer(max_features=250,
+                               example:word2vec_models=[(TfidfVectorizer(max_features=250,sublinear_tf=True,
                                         ngram_range=(2,3)),col,model_name,use_svd)],
                                use_svd:use Truncated Singular value decomposition to word2vec features.
         text_cols             :extract features of words, sentences, and paragraphs from text here.
@@ -276,7 +276,7 @@ class Yunbase():
                        ]
         }
         
-        if (self.use_optuna_find_params) and (self.custom_metric!=None) and self.optuna_direction not in ['minimize','maximize']:
+        if (self.custom_metric!=None) and (self.optuna_direction not in ['minimize','maximize']):
             raise ValueError("optuna_direction must be 'minimize' or 'maximize'.")
         self.early_stop=early_stop
         self.test=None#test data will be replaced when call predict function.
@@ -398,7 +398,7 @@ class Yunbase():
             dill.dump(obj, f, protocol=4)
     #load models when inference
     def pickle_load(self,path:str):
-        #open path,binary read
+        #open path,b/finary read
         with open(path, mode="rb") as f:
             data = dill.load(f)
             return data
@@ -1340,7 +1340,7 @@ class Yunbase():
                     y_pred=np.argmax(y_pred,axis=1)#transform probability to label
                 else:#shape==len(y_pred), maybe:[0.1,0.9],maybe:[0,1]
                     y_pred=np.round(y_pred)
-                return f1_score(y_true, y_pred)
+                return f1_score(y_true, y_pred,average='macro')
             elif self.metric=='mcc':
                 #lgb_eval_metric or Metric(target,oof_preds)?
                 if y_pred.shape==(len(y_pred),self.num_classes):
@@ -2114,6 +2114,7 @@ class Yunbase():
         test=self.load_data(test_path_or_file,mode='adv')
         train.columns=self.colname_clean(list(train.columns))
         test.columns=self.colname_clean(list(test.columns))
+        target_col=self.colname_clean([target_col])[0]
 
         if target_col=='' or type(target_col)==type(None):
             raise ValueError(f"{target_col} can't be None.")
@@ -2293,6 +2294,7 @@ class Yunbase():
                 metric=lgb_o2m[self.objective]
             #objective='regression','regression_l1','huber','fair','poisson','quantile','mape','gamma',
             #'tweedie','binary','multiclass','multiclassova','cross_entropy','cross_entropy_lambda'
+            #https://lightgbm.readthedocs.io/en/stable/Parameters.html
             lgb_params={"boosting_type": "gbdt","metric": metric,'objective':objective,
                         'random_state': self.seed,  "max_depth": 10,"learning_rate": 0.1,
                         "n_estimators": 20000,"colsample_bytree": 0.6,"colsample_bynode": 0.6,
@@ -2356,12 +2358,13 @@ class Yunbase():
             #metric to loss_function (MAE and MAPE)
             if metric in ['MAE','MAPE']:
                 loss_function=metric    
+            #'grow_policy': 'SymmetricTree','boost_from_average': True, colsample_bylevel
             cat_params={'loss_function':loss_function,'random_state':self.seed,'eval_metric': metric,
                        'bagging_temperature' : 0.50,'iterations': 20000,'learning_rate': 0.1,
                         'max_depth': 12,'l2_leaf_reg': 1.25,'min_data_in_leaf': 24,
                         'random_strength': 0.25, 'verbose' : 0,
                       }
-            #grow_policy:depthwise/lossguide:
+            #grow_policy:depthwise/lossguide,'objective': 'reg:squarederror','tree_method': 'hist',
             #https://www.kaggle.com/code/sureshmecad/xgboost-hyperparameter-autompg
             #https://www.kaggle.com/discussions/general/238684
             xgb_params={'random_state': self.seed, 'n_estimators': 20000, 
