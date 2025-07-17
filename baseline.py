@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/06/11
+@update_time:2025/07/17
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -1199,7 +1199,7 @@ class Yunbase():
                     for text in texts:
                         vector = np.zeros(word2vec_copy.vector_size)
                         count = 0
-                        for word in text:
+                        for word in text.split():
                             if word in word2vec_copy.wv:#if word in word vocabulary
                                 vector += word2vec_copy.wv[word]
                                 count += 1
@@ -1340,7 +1340,10 @@ class Yunbase():
                     y_pred=np.argmax(y_pred,axis=1)#transform probability to label
                 else:#shape==len(y_pred), maybe:[0.1,0.9],maybe:[0,1]
                     y_pred=np.round(y_pred)
-                return f1_score(y_true, y_pred,average='macro')
+                if self.objective=='binary':
+                    return f1_score(y_true, y_pred,average='binary')
+                else:
+                    return f1_score(y_true, y_pred,average='macro')
             elif self.metric=='mcc':
                 #lgb_eval_metric or Metric(target,oof_preds)?
                 if y_pred.shape==(len(y_pred),self.num_classes):
@@ -2192,7 +2195,7 @@ class Yunbase():
     #binary or multi_class
     def set_target2idx(self,y:pd.DataFrame,target2idx:dict|None=None):
         #use your custom target2idx  when objective=='binary' or 'multi_class'
-        self.use_custom_target2idx=(type(target2idx)==dict)
+        self.use_custom_target2idx=bool(type(target2idx)==dict)
         if self.use_custom_target2idx:#use your custom target2idx
             self.target2idx=target2idx
         else:
@@ -2212,57 +2215,67 @@ class Yunbase():
         return y
     
     def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
-            category_cols:list[str]=[],date_cols:list[str]=[],
+            category_cols:list[str]=[],save_trained_models:bool=True,
             target2idx:dict|None=None,pseudo_label_weight:float=0.5,
-            save_trained_models:bool=True,
+            fitwithCV:bool=True,date_cols:list[str]=[],
            ):
-        if self.num_folds<2:#kfold must greater than 1
-            raise ValueError("num_folds must be greater than 1.")
         #lightgbm:https://github.com/microsoft/LightGBM/blob/master/python-package/lightgbm/sklearn.py
         #xgboost:https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/sklearn.py
         #category_cols:Convert string columns to 'category'.
         self.category_cols=category_cols
-        self.date_cols=date_cols
-        self.pseudo_label_weight=pseudo_label_weight
         self.save_trained_models=save_trained_models
+        self.pseudo_label_weight=pseudo_label_weight
+        self.fitwithCV=fitwithCV
+        self.date_cols=date_cols
+
+        if (self.fitwithCV==False) and (self.use_oof_as_feature or self.save_oof_preds):
+            raise ValueError("When fit without CV,use_oof_as_feature or save_oof_preds must be False.")
+        if (self.fitwithCV==False) and (self.use_optuna_find_params>0):
+            raise ValueError("When fit without CV,use_optuna_find_params must be 0.")
+        if (self.fitwithCV==False) and (self.num_folds!=1):
+            raise ValueError("When fit without CV,num_folds must be 1.")
+        if (self.fitwithCV==False) and (self.n_repeats!=1):
+            raise ValueError("When fit without CV,n_repeats must be 1.")
+        
+        if self.fitwithCV and self.num_folds<2:#kfold must greater than 1
+            raise ValueError("num_folds must be greater than 1.")
         self.PrintColor("fit......",color=Fore.GREEN)
         self.PrintColor("load train data")
         self.train=self.load_data(path_or_file=train_path_or_file,mode='train')
-        if self.kfold_col in self.train.columns:
+        if self.fitwithCV and (self.kfold_col in self.train.columns):
             if sorted(self.train[self.kfold_col].unique())!=list(np.arange(self.num_folds)):
                 raise ValueError(f"values in {self.kfold_col} must be one of [0,1,……,{self.num_folds-1}]")   
         #process date_cols
-        for date_col in self.date_cols:
-            self.train[date_col]=pd.to_datetime(self.train[date_col])
-            self.train[date_col]=(self.train[date_col]-pd.to_datetime('1970-01-01')).dt.total_seconds()
-            self.train=self.construct_seasonal_feature(self.train,date_col,timestep='day')
-        self.train.drop(self.date_cols,axis=1,inplace=True)   
-        
-        self.sample_weight=self.train[self.weight_col]
-        self.train.drop([self.weight_col],axis=1,inplace=True)
-        self.target_dtype=self.train[self.target_col].dtype
+        if len(self.date_cols):
+            self.PrintColor("process date columns.")
+            for date_col in self.date_cols:
+                self.train[date_col]=pd.to_datetime(self.train[date_col])
+                self.train[date_col]=(self.train[date_col]-pd.to_datetime('1970-01-01')).dt.total_seconds()
+                self.train=self.construct_seasonal_feature(self.train,date_col,timestep='day')
+            self.train.drop(self.date_cols,axis=1,inplace=True)   
+
         try:#deal with TypeError: unhashable type: 'list'
             self.train=self.train.drop_duplicates()
         except:
             pass
+        self.sample_weight=self.train[self.weight_col]
+        self.train.drop([self.weight_col],axis=1,inplace=True)
+        self.target_dtype=self.train[self.target_col].dtype
+        
         self.PrintColor("Feature Engineer")
         self.train=self.base_FE(self.train,mode='train',drop_cols=self.drop_cols)
         X=self.train.drop([self.group_col,self.target_col],axis=1,errors='ignore')
+        #special characters in columns'name will lead to errors when GBDT model training.
         X.columns=self.colname_clean(list(X.columns))
         print(f"train.shape:{X.shape}")
         y=self.train[self.target_col]
-        
-        #special characters in columns'name will lead to errors when GBDT model training.
-        X_columns=list(X.columns)
-        print(f"feature_count:{len(X_columns)}")
                 
         #classification:target2idx,idx2target
         if self.objective!='regression':
             y=self.set_target2idx(y,target2idx)
 
         #save true label in train data to calculate final score 
-        self.features=X
-        self.target=y.values
+        self.features,self.target=X,y.values
         
         if self.exp_mode:#use log transform for target_col
             self.exp_mode_b=-y.min()
@@ -2396,40 +2409,41 @@ class Yunbase():
                             ]
 
         for repeat in range(self.n_repeats):
-            if self.kfold_col not in X.columns:
-                #choose cross validation
-                if self.objective!='regression':
-                    if self.group_col!=None:#group
-                        kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
-                    else:
-                        kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
-                else:#regression
-                    if self.group_col!=None:#group
-                        kf=GroupKFold(n_splits=self.num_folds)
-                    else:
-                        kf=KFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
-                kf_folds=pd.DataFrame({self.kfold_col:np.zeros(len(y))})
-                #use groupkfoldshuffle
-                if (self.group_col!=None) and self.objective=='regression':
-                    unique_group=sorted(group.unique())
-                    random_group=unique_group.copy()
-                    np.random.shuffle(random_group)
-                    random_map={k:v for k,v in zip(unique_group,random_group)}
-                    group=group.swifter.allow_dask_on_strings(False).apply(lambda x:random_map[x])
-                    group=group.sort_values()
-                    X=X.loc[list(group.index)]
-                    y=y.loc[list(group.index)]
-                    del unique_group,random_group,random_map
-                    gc.collect()
+            if self.fitwithCV:
+                if self.kfold_col not in X.columns:
+                    #choose cross validation
+                    if self.objective!='regression':
+                        if self.group_col!=None:#group
+                            kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
+                        else:
+                            kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
+                    else:#regression
+                        if self.group_col!=None:#group
+                            kf=GroupKFold(n_splits=self.num_folds)
+                        else:
+                            kf=KFold(n_splits=self.num_folds,random_state=self.seed+repeat,shuffle=True)
+                    kf_folds=pd.DataFrame({self.kfold_col:np.zeros(len(y))})
+                    #use groupkfoldshuffle
+                    if (self.group_col!=None) and self.objective=='regression':
+                        unique_group=sorted(group.unique())
+                        random_group=unique_group.copy()
+                        np.random.shuffle(random_group)
+                        random_map={k:v for k,v in zip(unique_group,random_group)}
+                        group=group.swifter.allow_dask_on_strings(False).apply(lambda x:random_map[x])
+                        group=group.sort_values()
+                        X=X.loc[list(group.index)]
+                        y=y.loc[list(group.index)]
+                        del unique_group,random_group,random_map
+                        gc.collect()
                     
-                for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
-                    kf_folds[self.kfold_col][valid_index]=fold
-                #sort_index
-                if (self.group_col!=None):
-                    X,y=X.sort_index(),y.sort_index()
-                    group,kf_folds=group.sort_index(),kf_folds.sort_index()
-            else:#custom_kfold
-                kf_folds=pd.DataFrame({self.kfold_col:X[self.kfold_col].values})
+                    for fold, (train_index, valid_index) in (enumerate(kf.split(X,y,group))):
+                        kf_folds[self.kfold_col][valid_index]=fold
+                    #sort_index
+                    if (self.group_col!=None):
+                        X,y=X.sort_index(),y.sort_index()
+                        group,kf_folds=group.sort_index(),kf_folds.sort_index()
+                else:#custom_kfold
+                    kf_folds=pd.DataFrame({self.kfold_col:X[self.kfold_col].values})
             
             #check params and update
             for i in range(len(self.models)):
@@ -2443,23 +2457,44 @@ class Yunbase():
                 
             self.PrintColor("model training")
             for (model,model_name) in self.models:
-                oof_preds,metric_score=self.cross_validation(X=X.drop([self.kfold_col],axis=1,errors='ignore'),y=y,group=group,repeat=repeat,kf_folds=kf_folds,
-                                                             model=copy.deepcopy(model),model_name=model_name,
-                                                             sample_weight=self.sample_weight,use_optuna=False,
-                                                             num_folds=self.num_folds,CV_FE=self.CV_FE,
-                                                             num_classes=self.num_classes,objective=self.objective,
-                                                             log=self.log,use_pseudo_label=self.use_pseudo_label,
-                                                             test=self.test,group_col=self.group_col,target_col=self.target_col,
-                                                             category_cols=self.colname_clean(copy.deepcopy(self.category_cols)),
-                                                             CV_stat=self.CV_stat_with_kfold if self.targetencoder_with_kfold else self.CV_stat_without_kfold,
-                                                             use_data_augmentation=self.use_data_augmentation,
-                                                             CV_sample=self.CV_sample,device=self.device,
-                                                             early_stop=self.early_stop,use_eval_metric=self.use_eval_metric,
-                                                             lgb_eval_metric=self.lgb_eval_metric,xgb_eval_metric=self.xgb_eval_metric,
-                                                             plot_feature_importance=self.plot_feature_importance,
-                                                             exp_mode=self.exp_mode,exp_mode_b=self.exp_mode_b,
-                                                             use_CIR=self.use_CIR,metric=self.metric,Metric=self.Metric
-                                                            )
+                if self.fitwithCV:
+                    oof_preds,metric_score=self.cross_validation(X=X.drop([self.kfold_col],axis=1,errors='ignore'),y=y,group=group,repeat=repeat,kf_folds=kf_folds,
+                                                                 model=copy.deepcopy(model),model_name=model_name,
+                                                                 sample_weight=self.sample_weight,use_optuna=False,
+                                                                 num_folds=self.num_folds,CV_FE=self.CV_FE,
+                                                                 num_classes=self.num_classes,objective=self.objective,
+                                                                 log=self.log,use_pseudo_label=self.use_pseudo_label,
+                                                                 test=self.test,group_col=self.group_col,target_col=self.target_col,
+                                                                 category_cols=self.colname_clean(copy.deepcopy(self.category_cols)),
+                                                                 CV_stat=self.CV_stat_with_kfold if self.targetencoder_with_kfold else self.CV_stat_without_kfold,
+                                                                 use_data_augmentation=self.use_data_augmentation,
+                                                                 CV_sample=self.CV_sample,device=self.device,
+                                                                 early_stop=self.early_stop,use_eval_metric=self.use_eval_metric,
+                                                                 lgb_eval_metric=self.lgb_eval_metric,xgb_eval_metric=self.xgb_eval_metric,
+                                                                 plot_feature_importance=self.plot_feature_importance,
+                                                                 exp_mode=self.exp_mode,exp_mode_b=self.exp_mode_b,
+                                                                 use_CIR=self.use_CIR,metric=self.metric,Metric=self.Metric
+                                                                )
+                else:
+                    self.fit_fulldata(X=X,y=y,
+                                      model=copy.deepcopy(model),model_name=model_name,
+                                      CV_FE=self.CV_FE,sample_weight=self.sample_weight, 
+                                      category_cols=self.colname_clean(copy.deepcopy(self.category_cols)),
+                                      CV_stat=self.CV_stat_with_kfold if self.targetencoder_with_kfold else self.CV_stat_without_kfold,
+                                     )
+                #Gradually transform this function into something similar to cross_validaiton(self,)
+                """                                             
+                 use_optuna=False,num_classes=self.num_classes,objective=self.objective,
+                 use_pseudo_label=self.use_pseudo_label,
+                 test=self.test,target_col=self.target_col,
+                 use_data_augmentation=self.use_data_augmentation,
+                 device=self.device,
+                 plot_feature_importance=self.plot_feature_importance,
+                 exp_mode=self.exp_mode,exp_mode_b=self.exp_mode_b,
+                 use_CIR=self.use_CIR,metric=self.metric,Metric=self.Metric                                                  
+                """
+                
+                
                 if self.use_oof_as_feature:
                     if self.objective=='regression':
                         X[f'{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_oof_preds']=oof_preds
@@ -2469,12 +2504,72 @@ class Yunbase():
                             X[f'{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_oof_preds_class{c}']=oof_preds[:,c]
                             self.train[f'{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_oof_preds_class{c}']=oof_preds[:,c]
 
-                metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
-                self.PrintColor(f"{metric}------------------------------>{metric_score}",color = Fore.RED)
+                if self.fitwithCV:
+                    metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
+                    self.PrintColor(f"{metric}------------------------------>{metric_score}",color = Fore.RED)
 
                 if self.save_oof_preds:#if oof_preds is needed
                     np.save(self.model_save_path+f"{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy",oof_preds)
 
+    #fit without kfold,just full data with one fold.
+    def fit_fulldata(self,X,y,model,model_name,sample_weight,
+                     category_cols,CV_FE=None,CV_stat=None,
+                    ):
+        if CV_stat!=None:
+            X=CV_stat(X=X,y=y,fold=0,repeat=0)
+        if CV_FE!=None:
+            X=CV_FE(X,mode='train',fold=0,repeat=0)
+        if 'lgb' in model_name:
+            #gpu params isn't set
+            if self.device in ['cuda','gpu']:#gpu mode when training
+                params=model.get_params()
+                if (params.get('device',-1)==-1) or (params.get('gpu_use_dp',-1)==-1):
+                     raise ValueError("The 'device' of lightgbm is 'gpu' and 'gpu_use_dp' must be True.")
+            model.fit(X, y,sample_weight=sample_weight,categorical_feature=category_cols,
+                     )
+        elif 'xgb' in model_name:
+            #gpu params isn't set
+            if self.device in ['cuda','gpu']:#gpu mode when training
+                params=model.get_params()
+                if (params.get('tree_method',-1)!='gpu_hist'):
+                     raise ValueError("The 'tree_method' of xgboost must be 'gpu_hist'.")
+            model.fit(X,y,sample_weight=sample_weight
+                     )
+        elif 'cat' in model_name:
+            #gpu params isn't set
+            if self.device in ['cuda','gpu']:#gpu mode when training
+                params=model.get_params()
+                if (params.get('task_type',-1)==-1):
+                     raise ValueError("The 'task_type' of catboost must be 'GPU'.")
+            X[category_cols]=X[category_cols].astype('string')
+            model.fit(X,y,sample_weight=sample_weight,cat_features=category_cols
+                     )
+        else:
+            model.fit(X,y)
+        if self.plot_feature_importance:
+            #can only support GBDT.
+            if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
+                origin_features=list(X.columns)  
+                feature_importance=model.feature_importances_
+                #convert to percentage
+                feature_importance=feature_importance/np.sum(feature_importance)
+                feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
+                feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
+                self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold0_{self.target_col}_feature_importance.pkl')
+                bestk,worstk=min(20,int(len(origin_features)*0.1+1)),min(20,int(len(origin_features)*0.1+1))
+                print(f"top{bestk} best features is :{list(feat_import_dict.keys())[:bestk]}")
+                print(f"top{worstk} worst features is :{list(feat_import_dict.keys())[-worstk:]}")
+
+                #plot feature importance
+                plt.figure(figsize = (12, 2*bestk/5))
+                sns.barplot(
+                    y=list(feat_import_dict.keys())[:bestk],
+                    x=list(feat_import_dict.values())[:bestk],
+                )
+                plt.title(f"{model_name} fold 0 top{bestk} best Feature Importance")
+                plt.show()
+        self.trained_models.append(copy.deepcopy(model))
+        
     #calculate each model cross validation metric scores.
     def CVMetricsSummary(self,):
         if self.objective=='regression':
@@ -2602,11 +2697,13 @@ class Yunbase():
             self.PrintColor("load test data")
             self.test=self.load_data(test_path_or_file,mode='test')
             #process date_cols
-            for date_col in self.date_cols:
-                self.test[date_col]=pd.to_datetime(self.test[date_col])
-                self.test[date_col]=(self.test[date_col]-pd.to_datetime('1970-01-01')).dt.total_seconds()
-                self.test=self.construct_seasonal_feature(self.test,date_col,timestep='day')
-            self.test.drop(self.date_cols,axis=1,inplace=True)
+            if len(self.date_cols):
+                self.PrintColor("process date columns.")
+                for date_col in self.date_cols:
+                    self.test[date_col]=pd.to_datetime(self.test[date_col])
+                    self.test[date_col]=(self.test[date_col]-pd.to_datetime('1970-01-01')).dt.total_seconds()
+                    self.test=self.construct_seasonal_feature(self.test,date_col,timestep='day')
+                self.test.drop(self.date_cols,axis=1,inplace=True)
             
             self.PrintColor("Feature Engineer")
             self.test=self.base_FE(self.test,mode='test',drop_cols=self.drop_cols)
@@ -2649,8 +2746,9 @@ class Yunbase():
                 self.test[self.target_col]=test_preds
                 self.trained_models=[]
                 self.trained_CIR=[]
-                self.fit(self.train_path_or_file,self.category_cols,
-                         self.date_cols,pseudo_label_weight=self.pseudo_label_weight,
+                self.fit(train_path_or_file=self.train_path_or_file,category_cols=self.category_cols,
+                         date_cols=self.date_cols,
+                         pseudo_label_weight=self.pseudo_label_weight,
                          save_trained_models=self.save_trained_models
                         )
                 #calculate oof score if save_oof_preds
@@ -2755,8 +2853,9 @@ class Yunbase():
         if self.use_pseudo_label:
             self.test[self.target_col]=np.argmax(test_preds,axis=1)
             self.trained_models=[]
-            self.fit(self.train_path_or_file,self.category_cols,
-                     self.date_cols,self.target2idx,pseudo_label_weight=self.pseudo_label_weight,
+            self.fit(train_path_or_file=self.train_path_or_file,category_cols=self.category_cols,
+                     date_cols=self.date_cols,target2idx=self.target2idx,
+                     pseudo_label_weight=self.pseudo_label_weight,
                      save_trained_models=self.save_trained_models
                     )
             #calculate oof score if save_oof_preds
