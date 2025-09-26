@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/07/17
+@update_time:2025/09/26
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -209,7 +209,9 @@ class Yunbase():
         self.supported_metrics=['custom_metric']+self.reg_metric+self.cla_metric
                                
         #current supported models
+        #pytabkit refer to :https://www.kaggle.com/competitions/playground-series-s5e8/writeups/2nd-place-yet-another-ensemble
         self.supported_models=['lgb','cat','xgb','ridge','Lasso','LinearRegression','LogisticRegression','tabnet',
+                               'realmlp(pytabkit need install yourself)','tabm(pytabkit need install yourself)',
                                 'Word2Vec','tfidfvec','countvec',
                               ]
         #current supported kfold.
@@ -1456,7 +1458,7 @@ class Yunbase():
         if mode=='train':
             train=file.copy()
             if self.target_col not in list(train.columns):
-                raise ValueError(f"{self.target_col} must in columns.")
+                raise ValueError(f"{self.target_col}(Parameter target_col) must in train.columns.")
             #if target_col is nan,then drop these data.
             train=train[~train[self.target_col].isna()]
             if self.weight_col not in list(train.columns):
@@ -1732,6 +1734,9 @@ class Yunbase():
                             )
                     else:
                         model.fit(X_train,y_train)
+                        if 'realmlp' in str(model).lower():
+                            model.alg_interface_.trainer.logger = False
+                    
                     #print feature importance when not use optuna to find params.
                     if self.plot_feature_importance:
                         #can only support GBDT.
@@ -1858,6 +1863,8 @@ class Yunbase():
                         )
             else:
                 model.fit(X_train,y_train)
+                if 'realmlp' in str(model).lower():
+                    model.alg_interface_.trainer.logger = False
             if self.save_trained_models:
                 self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{self.num_folds}_{self.target_col}.model')
             #inference
@@ -2045,6 +2052,8 @@ class Yunbase():
                     )
             else:#other models such as ridge,LinearRegression,LogisticRegression,
                 model.fit(X_train,y_train) 
+                if 'realmlp' in str(model).lower():
+                    model.alg_interface_.trainer.logger = False
 
             #print feature importance when not use optuna to find params.
             if (use_optuna==False) and (plot_feature_importance):
@@ -2147,8 +2156,9 @@ class Yunbase():
             kf_folds['fold'][valid_index]=fold
 
         temp_metric,temp_objective,temp_num_classes=self.metric,self.objective,self.num_classes
+        temp_custom_metric=self.custom_metric
         temp_trained_models=copy.deepcopy(self.trained_models)
-        self.metric,self.objective,self.num_classes,self.trained_models='auc','binary',2,[]
+        self.metric,self.objective,self.num_classes,self.custom_metric,self.trained_models='auc','binary',2,None,[]
         
         oof_preds,metric_score=self.cross_validation(X=X,y=y,group=None,kf_folds=kf_folds,
                          model=LGBMClassifier(n_estimators=256,metric='auc',
@@ -2166,6 +2176,7 @@ class Yunbase():
         self.PrintColor(f"{self.metric}------------------------------>{metric_score}",color = Fore.RED)
 
         self.metric,self.objective,self.num_classes=temp_metric,temp_objective,temp_num_classes
+        self.custom_metric=temp_custom_metric
         self.trained_models=copy.deepcopy(temp_trained_models)
     
     def drop_high_correlation_feats(self,df:pd.DataFrame)->None:
@@ -2546,6 +2557,8 @@ class Yunbase():
                      )
         else:
             model.fit(X,y)
+            if 'realmlp' in str(model).lower():
+                model.alg_interface_.trainer.logger = False
         if self.plot_feature_importance:
             #can only support GBDT.
             if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
