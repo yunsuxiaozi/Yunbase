@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/09/26
+@update_time:2025/10/11
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -34,6 +34,9 @@ from typing import Literal#The parameters of a function can only have fixed valu
 import dill#serialize and deserialize objects (such as saving and loading tree models)
 from colorama import Fore, Style #print colorful text
 import os#interact with operation system
+#deal with tabm's print
+import sys
+from contextlib import contextmanager
 
 #deal with text
 import re#python's built-in regular expressions.
@@ -404,6 +407,17 @@ class Yunbase():
         with open(path, mode="rb") as f:
             data = dill.load(f)
             return data
+
+    #reference:https://www.kaggle.com/code/masayakawamata/mic-tabm-baseline
+    @contextmanager
+    def suppress_stdout(self,):
+        with open(os.devnull, "w") as devnull:
+            old_stdout = sys.stdout
+            sys.stdout = devnull
+            try:
+                yield
+            finally:
+                sys.stdout = old_stdout
 
     #sample AGGREGATIONS
     def q1(self,x):
@@ -1732,10 +1746,14 @@ class Yunbase():
                                 X_train.to_numpy(), y_train.to_numpy(),
                                 batch_size=1024,
                             )
+                    elif 'tabm' in model_name:
+                        with self.suppress_stdout():
+                            model.fit(X_train, y_train, X_valid, y_valid, cat_col_names=self.category_cols)
+                    elif 'realmlp' in model_name:
+                        model.fit(X_train, y_train, X_valid, y_valid, cat_col_names=self.category_cols)
+                        model.alg_interface_.trainer.logger = False
                     else:
                         model.fit(X_train,y_train)
-                        if 'realmlp' in str(model).lower():
-                            model.alg_interface_.trainer.logger = False
                     
                     #print feature importance when not use optuna to find params.
                     if self.plot_feature_importance:
@@ -1861,10 +1879,14 @@ class Yunbase():
                             X_train.to_numpy(), y_train.to_numpy(),
                             batch_size=1024,
                         )
+            elif 'tabm' in model_name:
+                with self.suppress_stdout():
+                    model.fit(X_train, y_train, cat_col_names=self.category_cols)
+            elif 'realmlp' in model_name:
+                model.fit(X_train, y_train,cat_col_names=self.category_cols)
+                model.alg_interface_.trainer.logger = False
             else:
                 model.fit(X_train,y_train)
-                if 'realmlp' in str(model).lower():
-                    model.alg_interface_.trainer.logger = False
             if self.save_trained_models:
                 self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{self.num_folds}_{self.target_col}.model')
             #inference
@@ -2050,10 +2072,15 @@ class Yunbase():
                         eval_set=[(X_valid.to_numpy(), y_valid.to_numpy())],
                         batch_size=1024,
                     )
+
+            elif 'tabm' in model_name:
+                with self.suppress_stdout():
+                    model.fit(X_train, y_train, X_valid, y_valid, cat_col_names=category_cols)
+            elif 'realmlp' in model_name:
+                model.fit(X_train, y_train, X_valid, y_valid, cat_col_names=category_cols)
+                model.alg_interface_.trainer.logger = False
             else:#other models such as ridge,LinearRegression,LogisticRegression,
                 model.fit(X_train,y_train) 
-                if 'realmlp' in str(model).lower():
-                    model.alg_interface_.trainer.logger = False
 
             #print feature importance when not use optuna to find params.
             if (use_optuna==False) and (plot_feature_importance):
@@ -2555,10 +2582,16 @@ class Yunbase():
             X[category_cols]=X[category_cols].astype('string')
             model.fit(X,y,sample_weight=sample_weight,cat_features=category_cols
                      )
+
+        elif 'tabm' in model_name:
+            with self.suppress_stdout():
+                 model.fit(X,y,cat_col_names=category_cols)
+        elif 'realmlp' in model_name:
+            model.fit(X,y,cat_col_names=category_cols)
+            model.alg_interface_.trainer.logger = False
         else:
             model.fit(X,y)
-            if 'realmlp' in str(model).lower():
-                model.alg_interface_.trainer.logger = False
+            
         if self.plot_feature_importance:
             #can only support GBDT.
             if ('lgb' in model_name) or ('xgb' in model_name) or ('cat' in model_name):
