@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/10/11
+@update_time:2025/12/03
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -1751,7 +1751,6 @@ class Yunbase():
                             model.fit(X_train, y_train, X_valid, y_valid, cat_col_names=self.category_cols)
                     elif 'realmlp' in model_name:
                         model.fit(X_train, y_train, X_valid, y_valid, cat_col_names=self.category_cols)
-                        model.alg_interface_.trainer.logger = False
                     else:
                         model.fit(X_train,y_train)
                     
@@ -1884,7 +1883,6 @@ class Yunbase():
                     model.fit(X_train, y_train, cat_col_names=self.category_cols)
             elif 'realmlp' in model_name:
                 model.fit(X_train, y_train,cat_col_names=self.category_cols)
-                model.alg_interface_.trainer.logger = False
             else:
                 model.fit(X_train,y_train)
             if self.save_trained_models:
@@ -2078,7 +2076,6 @@ class Yunbase():
                     model.fit(X_train, y_train, X_valid, y_valid, cat_col_names=category_cols)
             elif 'realmlp' in model_name:
                 model.fit(X_train, y_train, X_valid, y_valid, cat_col_names=category_cols)
-                model.alg_interface_.trainer.logger = False
             else:#other models such as ridge,LinearRegression,LogisticRegression,
                 model.fit(X_train,y_train) 
 
@@ -2588,7 +2585,6 @@ class Yunbase():
                  model.fit(X,y,cat_col_names=category_cols)
         elif 'realmlp' in model_name:
             model.fit(X,y,cat_col_names=category_cols)
-            model.alg_interface_.trainer.logger = False
         else:
             model.fit(X,y)
             
