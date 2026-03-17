@@ -1,7 +1,7 @@
 """
 @author:yunsuxiaozi
 @start_time:2024/09/27
-@update_time:2025/12/03
+@update_time:2026/03/17
 """
 import polars as pl#similar to pandas, but with better performance when dealing with large datasets.
 import pandas as pd#read csv,parquet
@@ -11,7 +11,6 @@ from scipy.stats import kurtosis#calculate kurt
 #powerful plot libraries
 import matplotlib.pyplot as plt
 import seaborn as sns
-import swifter# speed up pandas
 
 #current supported kfold
 from sklearn.model_selection import KFold,StratifiedKFold,StratifiedGroupKFold,GroupKFold
@@ -356,6 +355,8 @@ class Yunbase():
         self.model_save_path="Yunbase_info/"
         if not os.path.exists(self.model_save_path):
             os.mkdir(self.model_save_path)
+            os.mkdir(self.model_save_path+"models/")#save trained_models.
+            os.mkdir(self.model_save_path+'predictions/')#save oof_preds and test_preds.
 
         self.eps=1e-15#clip (eps,1-eps) | divide by zero.
         self.category_cols=[]
@@ -505,9 +506,9 @@ class Yunbase():
         #thanks to https://github.com/yunsuxiaozi/Yunbase/issues/1
         text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
         #remove @yunsuxiaozi   person_name 
-        text=re.sub("@\w+",'',text)
+        text=re.sub(r"@\w+",'',text)
         #drop single character,they are meaningless. 'space a space'
-        text=re.sub("\s[a-z]\s",'',text)
+        text=re.sub(r"\s[a-z]\s",'',text)
         #remove number
         #text=re.sub("\d+",'',text)
         #drop english stopwords,they are meaningless.
@@ -572,22 +573,22 @@ class Yunbase():
                 error_cnts[i],texts[i]=self.text_correct(texts[i])
             df[f'{text_col}_error_cnts']=error_cnts
         
-        df[text_col+"_ARI"]=df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.ARI(x))
-        df[text_col+"_CLRI"]=df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.CLRI(x))
-        df[text_col+"_McAlpine_EFLAW"]=df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.McAlpine_EFLAW(x))
+        df[text_col+"_ARI"]=df[text_col].apply(lambda x:self.ARI(x))
+        df[text_col+"_CLRI"]=df[text_col].apply(lambda x:self.CLRI(x))
+        df[text_col+"_McAlpine_EFLAW"]=df[text_col].apply(lambda x:self.McAlpine_EFLAW(x))
         #split by ps
         ps='!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
         for i in range(len(ps)):
-            df[text_col+f"split_ps{i}_count"]=df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x:len(x.split(ps[i])))
+            df[text_col+f"split_ps{i}_count"]=df[text_col].apply(lambda x:len(x.split(ps[i])))
 
         self.PrintColor(f"-> for column {text_col} word feature",color=Fore.RED)
         text_col_word_df=df[['index',text_col]].copy()
         #get word_list   [index,tcol,word_list]
-        text_col_word_df[f'{text_col}_word']=text_col_word_df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.text2word(x))
+        text_col_word_df[f'{text_col}_word']=text_col_word_df[text_col].apply(lambda x:self.text2word(x))
         #[index,single_word]
         text_col_word_df=text_col_word_df.explode(f'{text_col}_word')[['index',f'{text_col}_word']]
         #[index,single_word,single_word_len]
-        text_col_word_df[f'{text_col}_word_len'] = text_col_word_df[f'{text_col}_word'].swifter.allow_dask_on_strings(False).apply(len)
+        text_col_word_df[f'{text_col}_word_len'] = text_col_word_df[f'{text_col}_word'].apply(len)
         #data clean [index,single_word,single_word_len]
         text_col_word_df=text_col_word_df[text_col_word_df[f'{text_col}_word_len']!=0]
         #for word features, extract the difference in length between the two words before and after.
@@ -603,12 +604,12 @@ class Yunbase():
         self.PrintColor(f"-> for column {text_col} sentence feature",color=Fore.RED)
         text_col_sent_df=df[['index',text_col]].copy()
         #get sent_list   [index,tcol,sent_list]
-        text_col_sent_df[f'{text_col}_sent']=text_col_sent_df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x: self.text2sentence(x))
+        text_col_sent_df[f'{text_col}_sent']=text_col_sent_df[text_col].apply(lambda x: self.text2sentence(x))
         #[index,single_sent]
         text_col_sent_df=text_col_sent_df.explode(f'{text_col}_sent')[['index',f'{text_col}_sent']]
         #[index,single_sent,single_sent_len]
-        text_col_sent_df[f'{text_col}_sent_len'] = text_col_sent_df[f'{text_col}_sent'].swifter.allow_dask_on_strings(False).apply(len)
-        text_col_sent_df[f'{text_col}_sent_word_count'] = text_col_sent_df[f'{text_col}_sent'].swifter.allow_dask_on_strings(False).apply(lambda x:len(re.split('\\ |\\,',x)))
+        text_col_sent_df[f'{text_col}_sent_len'] = text_col_sent_df[f'{text_col}_sent'].apply(len)
+        text_col_sent_df[f'{text_col}_sent_word_count'] = text_col_sent_df[f'{text_col}_sent'].apply(lambda x:len(re.split('\\ |\\,',x)))
         #data clean [index,single_sent,single_sent_len]
         group_cols=[f'{text_col}_sent_len',f'{text_col}_sent_word_count']
         for gcol in group_cols:
@@ -625,12 +626,12 @@ class Yunbase():
         self.PrintColor(f"-> for column {text_col} paragraph feature",color=Fore.RED)
         text_col_para_df=df[['index',text_col]].copy()
         #get para_list   [index,tcol,para_list]
-        text_col_para_df[f'{text_col}_para']=text_col_para_df[text_col].swifter.allow_dask_on_strings(False).apply(lambda x: self.text2paragraph(x))
+        text_col_para_df[f'{text_col}_para']=text_col_para_df[text_col].apply(lambda x: self.text2paragraph(x))
         #[index,single_para]
         text_col_para_df=text_col_para_df.explode(f'{text_col}_para')[['index',f'{text_col}_para']]
-        text_col_para_df[f'{text_col}_para_len'] = text_col_para_df[f'{text_col}_para'].swifter.allow_dask_on_strings(False).apply(len)
-        text_col_para_df[f'{text_col}_para_sent_count'] = text_col_para_df[f'{text_col}_para'].swifter.allow_dask_on_strings(False).apply(lambda x: len(re.split('\\.|\\?|\\!',x)))
-        text_col_para_df[f'{text_col}_para_word_count'] = text_col_para_df[f'{text_col}_para'].swifter.allow_dask_on_strings(False).apply(lambda x: len(re.split('\\.|\\?|\\!\\ |\\,',x)))
+        text_col_para_df[f'{text_col}_para_len'] = text_col_para_df[f'{text_col}_para'].apply(len)
+        text_col_para_df[f'{text_col}_para_sent_count'] = text_col_para_df[f'{text_col}_para'].apply(lambda x: len(re.split('\\.|\\?|\\!',x)))
+        text_col_para_df[f'{text_col}_para_word_count'] = text_col_para_df[f'{text_col}_para'].apply(lambda x: len(re.split('\\.|\\?|\\!\\ |\\,',x)))
         #data clean [index,single_sent,single_sent_len]
         group_cols=[f'{text_col}_para_len',f'{text_col}_para_sent_count',f'{text_col}_para_word_count']
         for gcol in group_cols:
@@ -662,12 +663,12 @@ class Yunbase():
             self.PrintColor(f"-> for column {pt_col} text clean",color=Fore.YELLOW)
             df[pt_col]=(df[pt_col].fillna('nan'))
             if df[pt_col].nunique()>0.5*len(df):
-                df[pt_col]=df[pt_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.clean_text(x))
+                df[pt_col]=df[pt_col].apply(lambda x:self.clean_text(x))
             else:#use dict to clean,save time.
                 text2clean={}
                 for text in df[pt_col].unique():
                     text2clean[text]=self.clean_text(text)
-                df[pt_col]=df[pt_col].swifter.allow_dask_on_strings(False).apply(lambda x:text2clean.get(x,'nan'))
+                df[pt_col]=df[pt_col].apply(lambda x:text2clean.get(x,'nan'))
                 del text2clean
                 gc.collect()
         
@@ -765,14 +766,14 @@ class Yunbase():
         #category columns
         for col in self.category_cols:
             #preprocessing
-            df[col]=df[col].swifter.allow_dask_on_strings(False).apply(lambda x:str(x).lower())
+            df[col]=df[col].apply(lambda x:str(x).lower())
             df[col]=df[col].astype(str).astype('category')
         
         if len(self.list_stat):
             print("< list column's feature >")
             for (l_col,l_gaps) in self.list_stat:
                 try:#if str(list),transform '[a,b]' to [a,b]
-                    df[l_col]=df[l_col].swifter.allow_dask_on_strings(False).apply(lambda x:ast.literal_eval(x))
+                    df[l_col]=df[l_col].apply(lambda x:ast.literal_eval(x))
                 except:#origin data is list or data can't be parsed.
                     #<class 'numpy.ndarray'> [10103]
                     if not isinstance(list(df[l_col].dropna().values[0]),list):
@@ -793,7 +794,7 @@ class Yunbase():
                 list_col_agg_df = list_col_df[['index']+group_cols].groupby(['index']).agg(self.AGGREGATIONS)
                 list_col_agg_df.columns = ['_'.join(x) for x in list_col_agg_df.columns]
                 df=df.merge(list_col_agg_df,on='index',how='left')
-                df[f'{l_col}_len']=df[l_col].swifter.allow_dask_on_strings(False).apply(len)
+                df[f'{l_col}_len']=df[l_col].apply(len)
                 
                 for gcol in group_cols:
                     if (f'{gcol}_max' in df.columns) and (f'{gcol}_min' in df.columns):
@@ -940,7 +941,7 @@ class Yunbase():
                         )
                     scaler.fit(df[col].values.reshape(-1,1))
                     if self.save_trained_models:
-                        self.pickle_dump(scaler,self.model_save_path+f'robustscaler_{col}_{self.target_col}.model')
+                        self.pickle_dump(scaler,self.model_save_path+'models/'+f'robustscaler_{col}_{self.target_col}.model')
                     self.trained_scaler[f'robustscaler_{col}.model']=copy.deepcopy(scaler)
                 df[col] = scaler.transform(df[col].values.reshape(-1,1))
                 df[col]=df[col].clip(-5,5)
@@ -962,9 +963,9 @@ class Yunbase():
                 for k,v in value.items():
                     le[k]=len(le)
                 if self.save_trained_models:
-                    self.pickle_dump(le,self.model_save_path+f'le_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model')
+                    self.pickle_dump(le,self.model_save_path+'models/'+f'le_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model')
                 self.trained_le[f'le_{col}_repeat{repeat}_fold{fold}.model']=copy.deepcopy(le)
-            df[col] = df[col].swifter.allow_dask_on_strings(False).apply(lambda x:le.get(x,0)) 
+            df[col] = df[col].apply(lambda x:le.get(x,0)) 
         return df
 
     def get_agg2pl(self,t_col):
@@ -1025,7 +1026,7 @@ class Yunbase():
                     TE[f"{g_col}_TE_{t_col}"]=agg_df
                 #save TE
                 if self.save_trained_models:
-                    self.pickle_dump(TE,self.model_save_path+f'TE_repeat{repeat}_fold{fold}_{self.target_col}.model')
+                    self.pickle_dump(TE,self.model_save_path+'models/'+f'TE_repeat{repeat}_fold{fold}_{self.target_col}.model')
                 self.trained_TE[f'TE_repeat{repeat}_fold{fold}.model']=copy.deepcopy(TE)
             #transform
             for k,agg_df in TE.items():
@@ -1093,7 +1094,7 @@ class Yunbase():
                     TE[f"{g_col}_TE_{t_col}"]=agg_df
                 #save TE
                 if self.save_trained_models:
-                    self.pickle_dump(TE,self.model_save_path+f'TE_repeat{repeat}_fold{fold}_{self.target_col}.model')
+                    self.pickle_dump(TE,self.model_save_path+'models/'+f'TE_repeat{repeat}_fold{fold}_{self.target_col}.model')
                 self.trained_TE[f'TE_repeat{repeat}_fold{fold}.model']=copy.deepcopy(TE)
 
                 #train set fit and transform,use kfold num_folds=5,index%5.
@@ -1194,7 +1195,7 @@ class Yunbase():
                     except:
                         word2vec.fit(df[col])
                         if self.save_trained_models:
-                            self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model') 
+                            self.pickle_dump(word2vec,self.model_save_path+'models/'+f'{model_name}_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model') 
                         self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]=copy.deepcopy(word2vec)
                     word2vec_feats=word2vec.transform(df[col]).toarray()
                 else:#word2vec from gensim  Word2Vec(vector_size=256, window=5, min_count=2, workers=16)
@@ -1208,7 +1209,7 @@ class Yunbase():
                         word2vec_copy.train(texts_split, total_examples=word2vec_copy.corpus_count,
                                        epochs=word2vec_copy.epochs)
                         if self.save_trained_models:
-                            self.pickle_dump(word2vec_copy,self.model_save_path+f'{model_name}_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model') 
+                            self.pickle_dump(word2vec_copy,self.model_save_path+'models/'+f'{model_name}_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model') 
                         self.trained_wordvec[f'{model_name}_{col}_repeat{repeat}_fold{fold}.model' ]=copy.deepcopy(word2vec_copy)
                     #transform 
                     word2vec_feats = []
@@ -1233,7 +1234,7 @@ class Yunbase():
                         svd.fit(word2vec_feats)
                         self.trained_svd[f'{model_name}_svd_{col}_repeat{repeat}_fold{fold}.model']=copy.deepcopy(svd)
                         if self.save_trained_models:
-                            self.pickle_dump(word2vec,self.model_save_path+f'{model_name}_svd_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model') 
+                            self.pickle_dump(word2vec,self.model_save_path+'models/'+f'{model_name}_svd_{col}_repeat{repeat}_fold{fold}_{self.target_col}.model') 
                     word2vec_feats=svd.transform(word2vec_feats)
                 for i in range(word2vec_feats.shape[1]):
                     df[f"{col}_{model_name}_{i}"]=word2vec_feats[:,i]
@@ -1728,7 +1729,7 @@ class Yunbase():
                             if X_train[X_train_columns[idx]].dtype=='category':
                                 cat_idxs.append(idx)
                                 cat_dims.append(self.train[X_train_columns[idx]].nunique())
-                                X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)          
+                                X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)          
                         params=model.get_params()
                         params['cat_idxs']=cat_idxs
                         params['cat_dims']=cat_dims
@@ -1764,7 +1765,7 @@ class Yunbase():
                             feature_importance=feature_importance/np.sum(feature_importance)
                             feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
                             feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
-                            self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold{fold}_{self.target_col}_feature_importance.pkl')
+                            self.pickle_dump(feat_import_dict,self.model_save_path+'models/'+f'{model_name}_fold{fold}_{self.target_col}_feature_importance.pkl')
                             bestk,worstk=min(20,int(len(origin_features)*0.1+1)),min(20,int(len(origin_features)*0.1+1))
                             print(f"top{bestk} best features is :{list(feat_import_dict.keys())[:bestk]}")
                             print(f"top{worstk} worst features is :{list(feat_import_dict.keys())[-worstk:]}")
@@ -1786,8 +1787,8 @@ class Yunbase():
                         valid_pred=np.expm1(valid_pred)-self.exp_mode_b
                         y_valid=np.expm1(y_valid)-self.exp_mode_b
                     if self.save_oof_preds:#if oof_preds is needed
-                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}_{self.target_col}_target.npy",y_valid.values)
-                        np.save(self.model_save_path+f"{model_name}_seed{self.seed}_fold{fold}_{self.target_col}_valid_pred.npy",valid_pred)
+                        np.save(self.model_save_path+"predictions/"+f"{model_name}_seed{self.seed}_fold{fold}_{self.target_col}_target.npy",y_valid.values)
+                        np.save(self.model_save_path+'predictions/'+f"{model_name}_seed{self.seed}_fold{fold}_{self.target_col}_valid_pred.npy",valid_pred)
                     
                     if use_weighted_metric:#only support custom_metric
                         CV_score.append(self.Metric(y_valid,valid_pred,valid_weight))
@@ -1796,7 +1797,7 @@ class Yunbase():
 
                     if 'tabnet' not in model_name:
                         if self.save_trained_models:
-                            self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{fold}_{self.target_col}.model')
+                            self.pickle_dump(model,self.model_save_path+'models/'+f'{model_name}_fold{fold}_{self.target_col}.model')
                     metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
                     print(f"{metric}:{CV_score[-1]}")
                 self.PrintColor(f"mean_{metric}------------------------------>{np.mean(CV_score)}",color = Fore.RED)
@@ -1858,7 +1859,7 @@ class Yunbase():
                     if X_train[X_train_columns[idx]].dtype=='category':
                         cat_idxs.append(idx)
                         cat_dims.append(self.train[X_train_columns[idx]].nunique())
-                        X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)      
+                        X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
                          
                 params=model.get_params()
                 params['cat_idxs']=cat_idxs
@@ -1886,7 +1887,7 @@ class Yunbase():
             else:
                 model.fit(X_train,y_train)
             if self.save_trained_models:
-                self.pickle_dump(model,self.model_save_path+f'{model_name}_fold{self.num_folds}_{self.target_col}.model')
+                self.pickle_dump(model,self.model_save_path+'models/'+f'{model_name}_fold{self.num_folds}_{self.target_col}.model')
             #inference
             if self.objective=='regression':
                 test_pred=self.predict_batch(model=model,test_X=test_X)
@@ -1894,7 +1895,7 @@ class Yunbase():
                 test_pred=self.predict_proba_batch(model=model,test_X=test_X)
             test_preds.append(test_pred)
         if self.save_test_preds:#True
-            np.save(self.model_save_path+f'{self.target_col}_test_preds.npy',test_preds)
+            np.save(self.model_save_path+"predictions/"+f'{self.target_col}_test_preds.npy',test_preds)
         test_preds=np.mean(test_preds,axis=0)
         if self.objective!='regression':
             if self.metric=='auc':
@@ -1979,7 +1980,13 @@ class Yunbase():
                 if CV_FE!=None:
                     test_copy=CV_FE(test_copy,mode='test',fold=fold,repeat=repeat)
                 test_X=test_copy.drop([group_col,target_col],axis=1,errors='ignore')
-                test_y=test_copy[target_col]
+
+                # test data's prediction can't use model trained by valid set.
+                path=self.model_save_path+"predictions/"
+                test_y=np.load(path+f'{model_name}_seed{self.seed}_repeat{repeat}_fold{fold}_{self.target_col}_test_preds.npy')
+                if len(test_y.shape)==2:#classification
+                    test_y=np.argmax(test_y,axis=1)
+                test_y=pd.DataFrame({target_col:test_y})[target_col]
                 
                 #concat will transform 'category' to 'object'
                 X_train=pd.concat((X_train,test_X),axis=0)
@@ -2049,8 +2056,8 @@ class Yunbase():
                      if X_train[X_train_columns[idx]].dtype=='category':
                          cat_idxs.append(idx)
                          cat_dims.append(X[X_train_columns[idx]].nunique())
-                         X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)      
-                         X_valid[X_train_columns[idx]]=X_valid[X_train_columns[idx]].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)      
+                         X_train[X_train_columns[idx]]=X_train[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
+                         X_valid[X_train_columns[idx]]=X_valid[X_train_columns[idx]].apply(lambda x:int(x)).astype(np.int32)      
                  params=model.get_params()
                  params['cat_idxs']=cat_idxs
                  params['cat_dims']=cat_dims
@@ -2090,7 +2097,7 @@ class Yunbase():
                     feature_importance=feature_importance/np.sum(feature_importance)
                     feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
                     feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
-                    self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_repeat{repeat}_fold{fold}_{self.target_col}_feature_importance.pkl')
+                    self.pickle_dump(feat_import_dict,self.model_save_path+'models/'+f'{model_name}_repeat{repeat}_fold{fold}_{self.target_col}_feature_importance.pkl')
                     bestk,worstk=min(10,int(len(origin_features)*0.1+1)),min(10,int(len(origin_features)*0.1+1))
                     print(f"top{bestk} best features is :{list(feat_import_dict.keys())[:bestk]}")
                     print(f"top{worstk} worst features is :{list(feat_import_dict.keys())[-worstk:]}")
@@ -2117,7 +2124,7 @@ class Yunbase():
             if not use_optuna:#not find_params(training)
                 if 'tabnet' not in model_name:
                     if self.save_trained_models:
-                        self.pickle_dump(model,self.model_save_path+f'{model_name}_repeat{repeat}_fold{fold}_{self.target_col}.model')
+                        self.pickle_dump(model,self.model_save_path+'models/'+f'{model_name}_repeat{repeat}_fold{fold}_{self.target_col}.model')
                 self.trained_models.append(copy.deepcopy(model))
             
             del X_train,y_train,X_valid,y_valid
@@ -2132,7 +2139,7 @@ class Yunbase():
             oof_preds=CIR.transform(oof_preds)
             #save CIR models
             if self.save_trained_models:
-                self.pickle_dump(CIR,self.model_save_path+f'CIR_{model_name}_repeat{repeat}_fold{fold}_{self.target_col}.model')
+                self.pickle_dump(CIR,self.model_save_path+'models/'+f'CIR_{model_name}_repeat{repeat}_fold{fold}_{self.target_col}.model')
             self.trained_CIR.append(copy.deepcopy(CIR))
             del CIR
             gc.collect()
@@ -2207,25 +2214,48 @@ class Yunbase():
         #target_col and group_col is for model training,don't delete.object feature is string.
         #Here we choose 0.99,other feature with high correlation can use Dimensionality reduction such as PCA.
         #if you want to delete other feature with high correlation,add into drop_cols when init.
-        numerical_cols=[col for col in df.columns \
-                        if (col not in [self.target_col,self.group_col,self.weight_col,self.kfold_col]) \
-                        and str(df[col].dtype) not in ['object','category']]
-        corr_matrix=df[numerical_cols].corr().values
-        drop_cols=[]
-        for i in range(len(corr_matrix)):
-            #time series data
-            #bg0 and bg1 have correlation of 0.99,……,bg{n-1} and bg{n} have correlation of 0.99,
-            #if don't add this,we will drop([bg1,……,bgn]),although bg0 and bgn have a low correlation.
-            if numerical_cols[i] not in drop_cols:
-                for j in range(i+1,len(corr_matrix)):
-                    if numerical_cols[j]  not in drop_cols:
-                        if abs(corr_matrix[i][j])>=0.99:
-                            drop_cols.append(numerical_cols[j])
+        numerical_cols=[c for c in df.columns \
+                        if (c not in [self.target_col,self.group_col,self.weight_col,self.kfold_col]) \
+                        and str(df[c].dtype) not in ['object','category']]
+        X = df[numerical_cols].fillna(0).values
+        #前面存活的特征的index.
+        alive_idx = []    
+        #已经删除的特征1,没有删除0.
+        drop_mask = np.zeros(len(numerical_cols), dtype=bool)
+    
+        for j in range(len(numerical_cols)):  
+            if drop_mask[j]:#如果特征j已经删掉了,就不用计算和其他特征的相关性了.
+                continue
+            #j还没删掉,存入没有被删除特征.
+            alive_idx.append(j)
+            #如果只有一个特征,无法计算相关性.
+            if len(alive_idx) == 1:
+                continue  
+            #j和其他特征计算相关性.
+            X_alive = X[:, alive_idx]  
+            #j和其他特征计算相关性.
+            prev,new = X_alive[:, :-1],X_alive[:, -1]  
+
+            #计算相关性的公式.
+            n = new.size
+            prev_ctr = prev - prev.mean(axis=0, keepdims=True)  
+            new_ctr  = new - new.mean()                         
+            cov = prev_ctr.T @ new_ctr / n                     
+
+            std_prev = np.sqrt(np.asarray(np.einsum('ij,ij->j', prev_ctr, prev_ctr),dtype=np.float32) / n) 
+            std_new  = np.sqrt(np.asarray(new_ctr @ new_ctr,dtype=np.float32) / n)
+            
+            rho = cov / (std_prev * std_new + 1e-16)  
+            #如果j和其他特征相关性太高,删除j
+            if np.any(np.abs(rho) >=0.99):
+                drop_mask[j] = True
+                alive_idx.pop() 
+        drop_cols = [numerical_cols[i] for i in np.where(drop_mask)[0]]
         #add drop_cols to self.drop_cols,they will be dropped in the final part of the function base_FE.
         print(f"drop_cols={drop_cols}")
         del numerical_cols
         gc.collect()
-        return drop_cols
+        return drop_cols    
 
     #binary or multi_class
     def set_target2idx(self,y:pd.DataFrame,target2idx:dict|None=None):
@@ -2246,7 +2276,7 @@ class Yunbase():
         for tgt,idx in self.target2idx.items():
                 self.idx2target[idx]=tgt
             
-        y=y.swifter.allow_dask_on_strings(False).apply(lambda k:self.target2idx[k])
+        y=y.apply(lambda k:self.target2idx[k])
         return y
     
     def fit(self,train_path_or_file:str|pd.DataFrame|pl.DataFrame='train.csv',
@@ -2316,10 +2346,7 @@ class Yunbase():
             self.exp_mode_b=-y.min()
             y=np.log1p(y+self.exp_mode_b)
         
-        if self.group_col!=None:
-            group=self.train[self.group_col]
-        else:
-            group=None
+        group=self.train[self.group_col] if self.group_col is not None else None
         
         #if you don't use your own models,then use built-in models.
         self.PrintColor("load models")
@@ -2355,7 +2382,7 @@ class Yunbase():
                 if self.kfold_col not in X.columns:
                     #choose cross validation
                     if self.objective!='regression':
-                        if self.group_col!=None:#group
+                        if self.group_col is not None:#group
                             kf=StratifiedGroupKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
                         else:
                             kf=StratifiedKFold(n_splits=self.num_folds,random_state=self.seed,shuffle=True)
@@ -2464,7 +2491,7 @@ class Yunbase():
                         random_group=unique_group.copy()
                         np.random.shuffle(random_group)
                         random_map={k:v for k,v in zip(unique_group,random_group)}
-                        group=group.swifter.allow_dask_on_strings(False).apply(lambda x:random_map[x])
+                        group=group.apply(lambda x:random_map[x])
                         group=group.sort_values()
                         X=X.loc[list(group.index)]
                         y=y.loc[list(group.index)]
@@ -2544,7 +2571,7 @@ class Yunbase():
                     self.PrintColor(f"{metric}------------------------------>{metric_score}",color = Fore.RED)
 
                 if self.save_oof_preds:#if oof_preds is needed
-                    np.save(self.model_save_path+f"{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy",oof_preds)
+                    np.save(self.model_save_path+"predictions/"+f"{model_name}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy",oof_preds)
 
     #fit without kfold,just full data with one fold.
     def fit_fulldata(self,X,y,model,model_name,sample_weight,
@@ -2597,7 +2624,7 @@ class Yunbase():
                 feature_importance=feature_importance/np.sum(feature_importance)
                 feat_import_dict={k:v for k,v in zip(origin_features,feature_importance)}
                 feat_import_dict={k:v for k,v in sorted(feat_import_dict.items(),key=lambda x:-x[1])}
-                self.pickle_dump(feat_import_dict,self.model_save_path+f'{model_name}_fold0_{self.target_col}_feature_importance.pkl')
+                self.pickle_dump(feat_import_dict,self.model_save_path+'models/'+f'{model_name}_fold0_{self.target_col}_feature_importance.pkl')
                 bestk,worstk=min(20,int(len(origin_features)*0.1+1)),min(20,int(len(origin_features)*0.1+1))
                 print(f"top{bestk} best features is :{list(feat_import_dict.keys())[:bestk]}")
                 print(f"top{worstk} worst features is :{list(feat_import_dict.keys())[-worstk:]}")
@@ -2623,12 +2650,20 @@ class Yunbase():
         summary_df=pd.DataFrame(np.zeros((0,len(self.models))))
         summary_df.columns=[model_name for (model,model_name) in self.models]
         for modeli in range(len(self.models)):
-            oof_preds=np.zeros_like(np.load(self.model_save_path+f"{self.models[0//self.num_folds][1]}_seed{self.seed}_repeat0_fold{self.num_folds}_{self.target_col}.npy"))
+            oof_preds=np.zeros_like(np.load(self.model_save_path+'predictions/'+f"{self.models[0//self.num_folds][1]}_seed{self.seed}_repeat0_fold{self.num_folds}_{self.target_col}.npy"))
             for repeat in range(self.n_repeats):
-                oof_preds+=np.load(self.model_save_path+f"{self.models[modeli][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy")
+                oof_preds+=np.load(self.model_save_path+'predictions/'+f"{self.models[modeli][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy")
             oof_preds=oof_preds/self.n_repeats
-            for metrici in range(len(metrics)):
-                self.metric=metrics[metrici]
+            if self.custom_metric==None:
+                for metrici in range(len(metrics)):
+                    self.metric=metrics[metrici]
+                    try:
+                        #calculate each metric
+                        summary_df.loc[self.metric,self.models[modeli][1]]=self.Metric(self.target,oof_preds) 
+                    except:
+                        summary_df.loc[self.metric,self.models[modeli][1]]=np.nan
+            else:
+                self.metric=self.custom_metric.__name__.lower()
                 try:
                     #calculate each metric
                     summary_df.loc[self.metric,self.models[modeli][1]]=self.Metric(self.target,oof_preds) 
@@ -2641,9 +2676,9 @@ class Yunbase():
         #calculate oof score if save_oof_preds
         if self.save_oof_preds:
             for repeat in range(self.n_repeats):
-                oof_preds=np.zeros_like(np.load(self.model_save_path+f"{self.models[0][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy"))
+                oof_preds=np.zeros_like(np.load(self.model_save_path+'predictions/'+f"{self.models[0][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy"))
                 for i in range(len(weights)//self.n_repeats):
-                    oof_pred=np.load(self.model_save_path+f"{self.models[i][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy")
+                    oof_pred=np.load(self.model_save_path+'predictions/'+f"{self.models[i][1]}_seed{self.seed}_repeat{repeat}_fold{self.num_folds}_{self.target_col}.npy")
                     oof_preds+=weights[i]*oof_pred
                 oof_preds=oof_preds/len(self.models)
                 metric=self.metric if self.custom_metric==None else self.custom_metric.__name__
@@ -2660,7 +2695,7 @@ class Yunbase():
         for idx in range(0,len(test_X),self.infer_size):
             if 'tabnet' in str(type(model)):
                 for c in category_cols:
-                   test_X[c]=test_X[c].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)     
+                   test_X[c]=test_X[c].apply(lambda x:int(x)).astype(np.int32)     
                 test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
             else:   
                 test_preds[idx:idx+self.infer_size]=model.predict(test_X[idx:idx+self.infer_size])  
@@ -2675,7 +2710,7 @@ class Yunbase():
             for idx in range(0,len(test_aug_X),self.infer_size):
                 if 'tabnet' in str(type(model)):
                     for c in category_cols:
-                       test_aug_X[c]=test_aug_X[c].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)     
+                       test_aug_X[c]=test_aug_X[c].apply(lambda x:int(x)).astype(np.int32)     
                     test_aug_preds[idx:idx+self.infer_size]=model.predict(test_aug_X[idx:idx+self.infer_size].to_numpy()).reshape(-1)
                 else:   
                     test_aug_preds[idx:idx+self.infer_size]=model.predict(test_aug_X[idx:idx+self.infer_size])  
@@ -2694,7 +2729,7 @@ class Yunbase():
         for idx in range(0,len(test_X),self.infer_size):
             if 'tabnet' in str(type(model)):
                 for c in category_cols:
-                    test_X[c]=test_X[c].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)     
+                    test_X[c]=test_X[c].apply(lambda x:int(x)).astype(np.int32)     
                 test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size].to_numpy())
             else:
                 test_preds[idx:idx+self.infer_size]=model.predict_proba(test_X[idx:idx+self.infer_size])
@@ -2709,7 +2744,7 @@ class Yunbase():
             for idx in range(0,len(test_aug_X),self.infer_size):
                 if 'tabnet' in str(type(model)):
                     for c in category_cols:
-                       test_aug_X[c]=test_aug_X[c].swifter.allow_dask_on_strings(False).apply(lambda x:int(x)).astype(np.int32)     
+                       test_aug_X[c]=test_aug_X[c].apply(lambda x:int(x)).astype(np.int32)     
                     test_aug_preds[idx:idx+self.infer_size]=model.predict_proba(test_aug_X[idx:idx+self.infer_size].to_numpy())
                 else:   
                     test_aug_preds[idx:idx+self.infer_size]=model.predict_proba(test_aug_X[idx:idx+self.infer_size])  
@@ -2756,9 +2791,13 @@ class Yunbase():
             test_preds=np.zeros((len(self.models)*self.n_repeats,len(self.test)))
             for idx in range(len(self.trained_models)): 
                 if self.targetencoder_with_kfold:
-                    test_copy=self.CV_stat_with_kfold(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+                    test_copy=self.CV_stat_with_kfold(X=self.test.copy(),
+                                                      fold=idx%self.num_folds,
+                                                      repeat=idx//(len(self.models)*self.num_folds)  )
                 else:
-                    test_copy=self.CV_stat_without_kfold(X=self.test.copy(),fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
+                    test_copy=self.CV_stat_without_kfold(X=self.test.copy(),
+                                                         fold=idx%self.num_folds,
+                                                         repeat=idx//(len(self.models)*self.num_folds)  )
                     
                 test_copy=self.CV_FE(test_copy,mode='test',fold=idx%self.num_folds,repeat=idx//(len(self.models)*self.num_folds)  )
                 try:
@@ -2768,6 +2807,13 @@ class Yunbase():
                     test_pred=self.predict_batch(model=self.trained_models[idx],test_X=test_copy)
                 if self.use_CIR:
                     test_pred=self.trained_CIR[idx//self.num_folds].transform(test_pred)
+
+                #save each fold test predictions for pseudo_label technology.
+                model_name=self.models[idx//self.num_folds%len(self.models)][1]
+                repeat=idx//(len(self.models)*self.num_folds)
+                path=self.model_save_path+"predictions/"
+                np.save(path+f'{model_name}_seed{self.seed}_repeat{repeat}_fold{idx%self.num_folds}_{self.target_col}_test_preds.npy',
+                        test_pred)
                 
                 test_preds[idx//self.num_folds]+=test_pred
                 if idx%self.num_folds==self.num_folds-1:
@@ -2777,7 +2823,7 @@ class Yunbase():
                     self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds']=test_preds[idx//self.num_folds]
                     
             if self.save_test_preds:
-                np.save(self.model_save_path+f'{self.target_col}_test_preds.npy',test_preds)
+                np.save(self.model_save_path+"predictions/"+f'{self.target_col}_test_preds.npy',test_preds)
             if self.use_median_as_pred:
                 test_preds=np.median(test_preds,axis=0)
             else:
@@ -2815,7 +2861,7 @@ class Yunbase():
                         test_preds[idx//self.num_folds]/=self.num_folds
                 
                 if self.save_test_preds:
-                    np.save(self.model_save_path+f'{self.target_col}_test_preds.npy',test_preds)
+                    np.save(self.model_save_path+"predictions/"+f'{self.target_col}_test_preds.npy',test_preds)
                 if self.use_median_as_pred:
                     test_preds=np.median(test_preds,axis=0)
                 else:
@@ -2879,6 +2925,14 @@ class Yunbase():
             except:
                 test_copy[self.category_cols]=test_copy[self.category_cols].astype('string')
                 test_pred=self.predict_proba_batch(model=self.trained_models[idx],test_X=test_copy)
+
+            #save each fold test predictions for pseudo_label technology.
+            model_name=self.models[idx//self.num_folds%len(self.models)][1]
+            repeat=idx//(len(self.models)*self.num_folds)
+            path=self.model_save_path+"predictions/"
+            np.save(path+f'{model_name}_seed{self.seed}_repeat{repeat}_fold{idx%self.num_folds}_{self.target_col}_test_preds.npy',
+                    test_pred)
+                
             
             test_preds[idx//self.num_folds]+=test_pred
             if idx%self.num_folds==self.num_folds-1:
@@ -2888,7 +2942,7 @@ class Yunbase():
                     self.test[f'{self.models[idx//self.num_folds%len(self.models)][1]}_seed{self.seed}_repeat{idx//(len(self.models)*self.num_folds )}_fold{self.num_folds}_oof_preds_class{c}']=test_preds[idx//self.num_folds][:,c]
                     
         if self.save_test_preds:
-            np.save(self.model_save_path+f'{self.target_col}_test_preds.npy',test_preds)
+            np.save(self.model_save_path+"predictions/"+f'{self.target_col}_test_preds.npy',test_preds)
         test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)#(len(test),self.num_classes)
         
         #use pseudo label
@@ -2922,11 +2976,11 @@ class Yunbase():
                     test_preds[idx//self.num_folds]/=self.num_folds
                 
             if self.save_test_preds:
-                np.save(self.model_save_path+f'{self.target_col}_test_preds.npy',test_preds)
+                np.save(self.model_save_path+"predictions/"+f'{self.target_col}_test_preds.npy',test_preds)
             test_preds=np.mean([test_preds[i]*weights[i] for i in range(len(test_preds))],axis=0)
         self.PrintColor(f"idx2target={self.idx2target}",color=Fore.RED)
         if self.save_trained_models:
-            self.pickle_dump(self.idx2target,self.model_save_path+f'_{self.target_col}_idx2target.pkl')
+            self.pickle_dump(self.idx2target,self.model_save_path+'models/'+f'_{self.target_col}_idx2target.pkl')
         
         return test_preds        
         
@@ -3010,7 +3064,7 @@ class Yunbase():
         if self.objective!='regression':
             #auc and your custom auc metric
             if 'auc' not in self.metric:
-                submission[self.target_col]=submission[self.target_col].swifter.allow_dask_on_strings(False).apply(lambda x:self.idx2target[x])
+                submission[self.target_col]=submission[self.target_col].apply(lambda x:self.idx2target[x])
         #deal with bool.
         if 'auc'  not in self.metric:
             submission[self.target_col]=submission[self.target_col].astype(self.target_dtype)
